@@ -24,7 +24,7 @@ export async function ensureProfile(yandexId, displayName) {
 
   const { data: created, error: insErr } = await supabase
     .from('profiles')
-    .insert({ yandex_id: yandexId, display_name: displayName, equipped_skin_id: 'classic' })
+    .insert({ yandex_id: yandexId, display_name: displayName, equipped_skin_id: 'classic', coins: 1000 })
     .select()
     .single();
   if (insErr) throw insErr;

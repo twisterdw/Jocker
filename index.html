@@ -324,7 +324,9 @@
   <div class="modal" id="modalBox"></div>
 </div>
 
-<script>
+<script type="module">
+import { initYandexSDK, markGameReady, getYandexId, getPlayerName } from './yandex-sdk.js';
+import { ensureProfile, listSkins, listOwnedSkins, buySkin as buySkinRemote, equipSkin as equipSkinRemote } from './supabase-client.js';
 const SUITS = ['♠','♥','♦','♣'];
 const SUIT_NAMES = {'♠':'пики','♥':'черви','♦':'бубны','♣':'крести'};
 const RED_SUITS = ['♥','♦'];
@@ -391,16 +393,44 @@ let GAME_MODE = 'long';   // 'long' or 'nines' — picked on the setup screen be
 let PULKA_LIMIT = Infinity; // how many pulkas make up the whole game ('nines' mode caps this at 4)
 let G = null;
 
-// ---------- Локальная заглушка экономики (монеты/скины) ----------
-// Пока не подключён Supabase — храним прямо в памяти вкладки, не сохраняется
-// между визитами. При подключении бэкенда заменить на supabase-client.js.
-let PLAYER_COINS = 1000;
+// ---------- Экономика (монеты/скины) — подключена к Supabase ----------
+let PLAYER_COINS = 0;
 let EQUIPPED_SKIN = 'classic';
 const OWNED_SKINS = new Set(['classic']);
+let YANDEX_ID = null; // null пока профиль не загружен — тогда экономика офлайн (не сохраняется)
 const SKINS_CATALOG = [
   { id:'classic', name:'Классическая колода', price:0, desc:'Стандартный вид карт — доступна всем.', ready:true },
   { id:'fantasy_knights', name:'Фэнтези: рыцари и драконы', price:1500, desc:'Скоро — иллюстрации в работе.', ready:false },
 ];
+
+// Вызывается один раз при загрузке страницы (см. низ файла). Тянет профиль,
+// баланс и купленные скины из Supabase; если что-то пошло не так — тихо
+// остаёмся в офлайн-режиме (игра всё равно играбельна, просто без сохранения).
+async function initEconomy(){
+  try{
+    await initYandexSDK();
+    YANDEX_ID = getYandexId();
+    if(!YANDEX_ID) return;
+
+    const profile = await ensureProfile(YANDEX_ID, getPlayerName());
+    PLAYER_COINS = Number(profile.coins) || 0;
+    EQUIPPED_SKIN = profile.equipped_skin_id || 'classic';
+
+    const owned = await listOwnedSkins(YANDEX_ID);
+    OWNED_SKINS.clear();
+    OWNED_SKINS.add('classic');
+    owned.forEach(id => OWNED_SKINS.add(id));
+
+    const remoteSkins = await listSkins();
+    remoteSkins.forEach(rs => {
+      const local = SKINS_CATALOG.find(s => s.id === rs.id);
+      if(local) local.price = rs.price_coins;
+    });
+  }catch(e){
+    console.warn('Supabase недоступен — офлайн-режим (прогресс не сохранится).', e);
+    YANDEX_ID = null;
+  }
+}
 let selectedCardKey = null; // tracks the human's tapped-but-not-yet-confirmed card
 function cardKey(c){ return c.joker ? ('J'+c.jid) : (c.suit+c.rank); }
 
@@ -1321,7 +1351,15 @@ function showInventoryModal(){
     <div class="controls"><button class="btn secondary" id="closeInvBtn">Закрыть</button></div>`;
   document.getElementById('modalOverlay').classList.remove('hidden');
   box.querySelectorAll('button[data-skin]').forEach(btn=>{
-    btn.onclick = ()=>{ EQUIPPED_SKIN = btn.getAttribute('data-skin'); showInventoryModal(); };
+    btn.onclick = async ()=>{
+      const id = btn.getAttribute('data-skin');
+      EQUIPPED_SKIN = id;
+      showInventoryModal();
+      if(YANDEX_ID){
+        try{ await equipSkinRemote(YANDEX_ID, id); }
+        catch(e){ console.error('Не удалось сохранить экипированный скин:', e); }
+      }
+    };
   });
   document.getElementById('closeInvBtn').onclick = ()=>{
     document.getElementById('modalOverlay').classList.add('hidden');
@@ -1347,13 +1385,23 @@ function showShopModal(){
     <div class="controls"><button class="btn secondary" id="closeShopBtn">Закрыть</button></div>`;
   document.getElementById('modalOverlay').classList.remove('hidden');
   box.querySelectorAll('button[data-buy]').forEach(btn=>{
-    btn.onclick = ()=>{
+    btn.onclick = async ()=>{
       const id = btn.getAttribute('data-buy');
       const skin = SKINS_CATALOG.find(s=>s.id===id);
       if(PLAYER_COINS < skin.price) return;
-      PLAYER_COINS -= skin.price;
-      OWNED_SKINS.add(id);
-      showShopModal();
+      btn.disabled = true;
+      try{
+        if(YANDEX_ID){
+          const ok = await buySkinRemote(YANDEX_ID, id);
+          if(!ok){ btn.disabled = false; return; } // сервер отказал (не хватило монет)
+        }
+        PLAYER_COINS -= skin.price;
+        OWNED_SKINS.add(id);
+        showShopModal();
+      }catch(e){
+        console.error('Не удалось купить скин:', e);
+        btn.disabled = false;
+      }
     };
   });
   document.getElementById('closeShopBtn').onclick = ()=>{
@@ -1482,7 +1530,10 @@ document.getElementById('resultsTableBtn').onclick = showResultsTableModal;
 document.getElementById('inventoryBtn').onclick = showInventoryModal;
 document.getElementById('shopBtn').onclick = showShopModal;
 
-showSetupModal();
+initEconomy().then(()=>{
+  showSetupModal();
+  markGameReady(); // сообщаем Яндекс Играм, что экран выбора формата уже показан
+});
 </script>
 </body>
 </html>
