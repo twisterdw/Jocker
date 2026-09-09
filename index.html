@@ -1,0 +1,1488 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Джокер — тестовая версия</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Manrope:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --felt-1:#0e3d2e;
+    --felt-2:#144d3a;
+    --wood:#3b2a20;
+    --wood-light:#5a4030;
+    --cream:#f2ead9;
+    --gold:#c9a24b;
+    --red:#a3273a;
+    --ink:#1c1b19;
+    --panel:#12261e;
+    --panel-line:rgba(242,234,217,0.14);
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;height:100%;}
+  body{
+    font-family:'Manrope',sans-serif;
+    background:
+      radial-gradient(ellipse at center, var(--felt-2) 0%, var(--felt-1) 65%, #08241a 100%);
+    color:var(--cream);
+    min-height:100vh;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    padding:18px 12px 40px;
+  }
+  h1,h2,h3{font-family:'Fraunces',serif; margin:0;}
+  .title-row{
+    display:flex; align-items:baseline; gap:14px; margin-bottom:6px; width:100%; max-width:760px; justify-content:space-between; flex-wrap:wrap;
+  }
+  .title-left{display:flex; align-items:baseline; gap:14px;}
+  .title-row h1{font-size:1.7rem; font-weight:700; color:var(--gold); letter-spacing:0.02em;}
+  .title-row .sub{font-size:0.85rem; color:rgba(242,234,217,0.65);}
+  .top-actions{display:flex; gap:8px;}
+  .icon-btn{
+    background:rgba(0,0,0,0.3); border:1px solid var(--panel-line); color:var(--cream);
+    border-radius:8px; padding:6px 10px; font-size:0.78rem; cursor:pointer;
+  }
+  .icon-btn:hover{background:rgba(0,0,0,0.45);}
+
+  .board{
+    width:100%; max-width:760px;
+    background:linear-gradient(180deg, var(--wood-light), var(--wood));
+    border-radius:22px;
+    padding:14px;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.45), inset 0 0 0 1px rgba(0,0,0,0.25);
+  }
+  .scoreboard{
+    display:grid; grid-template-columns:repeat(4,1fr); gap:8px;
+    margin-bottom:12px;
+  }
+  .score-card{
+    background:var(--panel); border:1px solid var(--panel-line); border-radius:12px;
+    padding:8px 10px; text-align:center; position:relative;
+  }
+  .score-card .name{font-size:0.72rem; text-transform:uppercase; letter-spacing:0.06em; color:rgba(242,234,217,0.6);}
+  .score-card.you{outline:1px solid var(--gold);}
+  .score-card.dealer-tag::before{
+    content:'сдаёт'; position:absolute; top:-8px; right:6px; background:var(--gold); color:#2a1c08;
+    font-size:0.55rem; font-weight:700; padding:1px 5px; border-radius:5px;
+  }
+  .score-card .val{font-family:'Fraunces',serif; font-size:1.35rem; font-weight:700; color:var(--cream);}
+  .score-card .bidinfo{font-size:0.68rem; color:rgba(242,234,217,0.5); margin-top:2px; min-height:14px;}
+  .score-card .orderinfo{font-size:0.65rem; color:var(--gold); margin-top:2px;}
+
+  .info-bar{
+    display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px;
+    background:rgba(0,0,0,0.25); border-radius:12px; padding:8px 12px; margin-bottom:12px;
+    font-size:0.82rem;
+  }
+  .info-bar b{color:var(--gold); font-weight:700;}
+
+  .bid-status{
+    display:flex; gap:6px; flex-wrap:wrap; justify-content:center;
+    margin-bottom:10px;
+  }
+  .bid-chip{
+    background:rgba(0,0,0,0.3); border:1px solid var(--panel-line); border-radius:20px;
+    padding:5px 11px; font-size:0.76rem; display:flex; gap:5px; align-items:center;
+  }
+  .bid-chip.active{border-color:var(--gold); background:rgba(201,162,75,0.18); box-shadow:0 0 0 1px var(--gold);}
+  .bid-chip .v{font-weight:700; color:var(--gold);}
+
+  .order-banner{
+    background:rgba(201,162,75,0.18); border:1px solid var(--gold); border-radius:12px;
+    padding:9px 14px; margin-bottom:10px; font-size:0.85rem; text-align:center; font-weight:700;
+    color:var(--gold); line-height:1.35;
+  }
+
+  .table-felt{
+    background: radial-gradient(circle at center, var(--felt-2), var(--felt-1) 80%);
+    border-radius:18px;
+    border:6px solid var(--wood);
+    padding:18px;
+    min-height:340px;
+    position:relative;
+    display:grid;
+    grid-template-columns: 90px 1fr 90px;
+    grid-template-rows: 76px 1fr 90px 92px;
+    gap:6px;
+  }
+  .seat{ display:flex; flex-direction:column; align-items:center; justify-content:center; gap:4px;}
+  .seat .avatar{
+    width:46px; height:46px; border-radius:50%;
+    background:radial-gradient(circle at 35% 30%, #d8c497, var(--gold));
+    display:flex; align-items:center; justify-content:center;
+    font-family:'Fraunces',serif; font-weight:700; color:var(--ink); font-size:1.1rem;
+    box-shadow:0 3px 8px rgba(0,0,0,0.4);
+    transition: box-shadow .2s ease;
+    position:relative;
+  }
+  .headcount{
+    position:absolute; top:-7px; right:-9px;
+    background:var(--red); color:#fff; border:1px solid rgba(0,0,0,0.3);
+    border-radius:9px; min-width:22px; height:16px; padding:0 4px;
+    display:flex; align-items:center; justify-content:center;
+    font-family:'Manrope',sans-serif; font-size:0.55rem; font-weight:700;
+    box-shadow:0 2px 4px rgba(0,0,0,0.4);
+  }
+  .last-trick-btn{
+    position:absolute; bottom:-7px; left:-9px;
+    background:var(--gold); color:#2a1c08; border:1px solid rgba(0,0,0,0.35);
+    border-radius:8px; min-width:22px; height:18px; padding:0 3px;
+    display:flex; align-items:center; justify-content:center;
+    font-size:0.7rem; line-height:1; cursor:pointer;
+    box-shadow:0 2px 4px rgba(0,0,0,0.4);
+  }
+  .last-trick-btn.hidden{display:none;}
+  .seat-bubble{
+    position:absolute; z-index:45; background:var(--cream); color:var(--ink);
+    border-radius:12px; padding:6px 10px; font-size:0.7rem; font-weight:700;
+    box-shadow:0 4px 10px rgba(0,0,0,0.4); max-width:130px; text-align:center;
+    pointer-events:none; opacity:0; animation: bubblein .18s ease forwards;
+  }
+  @keyframes bubblein{ from{opacity:0;} to{opacity:1;} }
+
+  .table-dialog{
+    position:absolute; left:50%; bottom:-8px; transform:translate(-50%, 100%);
+    background:var(--panel); border:1px solid var(--gold); border-radius:14px;
+    padding:10px 14px; z-index:60; width:calc(100% - 24px); max-width:380px;
+    box-shadow:0 10px 24px rgba(0,0,0,0.55); text-align:center;
+  }
+  .table-dialog p{margin:0 0 8px; font-size:0.8rem; color:var(--cream);}
+  .table-dialog .controls, .table-dialog .bid-grid{margin-top:0;}
+  .seat .label{font-size:0.72rem; color:rgba(242,234,217,0.85);}
+  .seat.dealer .avatar{box-shadow:0 0 0 3px var(--gold), 0 3px 8px rgba(0,0,0,0.4);}
+  .seat.turn .avatar{box-shadow:0 0 0 3px #6fe3a3, 0 0 14px 4px rgba(111,227,163,0.7);}
+  .seat.turn .label{color:#8ff5bd; font-weight:700;}
+  .seat-top{grid-column:2; grid-row:1;}
+  .seat-left{grid-column:1; grid-row:2;}
+  .seat-right{grid-column:3; grid-row:2;}
+  .seat-you{grid-column:2; grid-row:3; align-self:end;}
+
+  .trick-zone{
+    grid-column:2; grid-row:2;
+    position:relative;
+    min-height:120px;
+  }
+  .trick-card-wrap{
+    position:absolute; top:50%; left:50%; text-align:center;
+    transition: all .25s ease;
+  }
+  .trick-card-wrap .plabel{font-size:0.6rem; margin-top:2px; color:rgba(242,234,217,0.75);}
+
+  .talon-zone{
+    position:absolute; top:8px; right:10px; display:flex; flex-direction:column; align-items:center; gap:2px;
+  }
+  .talon-stack{position:relative; width:40px; height:56px;}
+  .talon-stack .card{position:absolute; top:0; left:0;}
+  .talon-label{font-size:0.6rem; color:rgba(242,234,217,0.65); margin-top:3px;}
+
+  .trump-badge{
+    position:absolute; top:10px; left:12px;
+    background:rgba(0,0,0,0.35); border:1px solid var(--panel-line);
+    border-radius:10px; padding:5px 9px; font-size:0.75rem;
+  }
+
+  .card{
+    width:46px; height:64px; border-radius:7px; background:var(--cream);
+    display:flex; flex-direction:column; align-items:center; justify-content:center;
+    font-family:'Fraunces',serif; font-weight:700; font-size:1.05rem; color:var(--ink);
+    box-shadow:0 3px 6px rgba(0,0,0,0.4);
+    border:1px solid rgba(0,0,0,0.15);
+    flex-shrink:0;
+  }
+  .card.red{color:var(--red);}
+  .card.back{
+    background:repeating-linear-gradient(45deg, #274b3c, #274b3c 5px, #1c3a2d 5px, #1c3a2d 10px);
+    border:1px solid rgba(0,0,0,0.3);
+  }
+  .card.joker{
+    background:linear-gradient(160deg,#f2ead9,#e2d3ac);
+    color:var(--red);
+  }
+  .card.playable{cursor:pointer; transition:transform .12s ease;}
+  .card.playable:hover{transform:translateY(-8px); z-index:80 !important;}
+  .card.disabled{opacity:0.4; filter:grayscale(0.4);}
+  .card.selected{
+    transform:translateY(-14px);
+    box-shadow:0 0 0 3px var(--gold), 0 6px 14px rgba(0,0,0,0.5);
+    z-index:90 !important;
+  }
+
+  .hand-row{
+    grid-column: 1 / -1; grid-row:4;
+    display:flex; justify-content:center; flex-wrap:nowrap; align-items:flex-start;
+    padding-top:8px; padding-bottom:6px; overflow:visible;
+  }
+  /* Card counts for the other players aren't shown — keeps the table a fixed size. */
+  .mini-hand{display:none;}
+  .mini-hand .card{width:20px; height:28px; font-size:0.5rem;}
+
+  .controls{
+    margin-top:14px; display:flex; flex-wrap:wrap; gap:8px; justify-content:center;
+  }
+  .btn{
+    background:var(--gold); color:#2a1c08; border:none; border-radius:8px;
+    padding:9px 16px; font-weight:700; cursor:pointer; font-size:0.88rem;
+    font-family:'Manrope',sans-serif;
+    box-shadow:0 3px 0 #8a6d2e;
+  }
+  .btn:active{transform:translateY(2px); box-shadow:0 1px 0 #8a6d2e;}
+  .btn.secondary{background:transparent; color:var(--cream); border:1px solid var(--panel-line); box-shadow:none;}
+  .btn:disabled{opacity:0.35; cursor:default; box-shadow:none;}
+
+  .bid-grid{display:flex; flex-wrap:wrap; gap:6px; justify-content:center;}
+  .bid-btn{
+    min-width:38px; padding:8px 0; border-radius:8px; border:1px solid var(--panel-line);
+    background:rgba(242,234,217,0.08); color:var(--cream); font-weight:700; cursor:pointer;
+  }
+  .bid-btn:hover{background:rgba(242,234,217,0.18);}
+  .bid-btn.forbidden{opacity:0.3; text-decoration:line-through; cursor:not-allowed;}
+
+  .footer-row{display:flex; gap:8px; justify-content:center; margin-top:10px; flex-wrap:wrap;}
+
+  .modal-overlay{
+    position:fixed; inset:0; background:rgba(0,0,0,0.6);
+    display:flex; align-items:center; justify-content:center; z-index:50; padding:16px;
+  }
+  .modal{
+    background:var(--panel); border:1px solid var(--panel-line); border-radius:16px;
+    padding:20px; max-width:460px; width:100%; max-height:85vh; overflow-y:auto;
+  }
+  .modal h2{color:var(--gold); font-size:1.2rem; margin-bottom:10px;}
+  table.score-table{width:100%; border-collapse:collapse; font-size:0.85rem; margin:10px 0;}
+  table.score-table th, table.score-table td{padding:5px 6px; text-align:center; border-bottom:1px solid var(--panel-line);}
+  table.score-table th{color:var(--gold); font-weight:700;}
+  .ace-line{font-size:0.85rem; margin-bottom:4px; color:rgba(242,234,217,0.85);}
+  .ace-line.ace-hit{color:var(--gold); font-weight:700;}
+  .hidden{display:none !important;}
+  footer{margin-top:16px; font-size:0.7rem; color:rgba(242,234,217,0.4); text-align:center; max-width:600px;}
+</style>
+</head>
+<body>
+
+<div class="title-row">
+  <div class="title-left">
+    <h1>Джокер</h1>
+    <span class="sub">тестовая пулька · 3 компьютерных соперника</span>
+  </div>
+  <div class="top-actions">
+    <button class="icon-btn" id="fullscreenBtn">⛶ Во весь экран</button>
+    <button class="icon-btn" id="resultsTableBtn">Таблица результатов</button>
+    <button class="icon-btn" id="inventoryBtn">Инвентарь</button>
+    <button class="icon-btn" id="shopBtn">Магазин</button>
+    <button class="icon-btn" id="restartBtn">Начать заново</button>
+  </div>
+</div>
+
+<div class="board">
+
+  <div class="scoreboard" id="scoreboard"></div>
+
+  <div class="info-bar" id="infoBar"></div>
+
+  <div class="bid-status hidden" id="bidStatus"></div>
+
+  <div class="order-banner hidden" id="orderBanner"></div>
+
+  <div class="table-felt">
+    <div class="trump-badge" id="trumpBadge">козырь: —</div>
+    <div class="talon-zone" id="talonZone"></div>
+
+    <div class="seat seat-top" id="seat-2">
+      <div class="avatar">Б2<span class="headcount" id="headcount-2">–/0</span><button class="last-trick-btn hidden" id="lasttrick-2" title="Последняя взятка">🂠</button></div>
+      <div class="label" id="label-2">Бот 2</div>
+      <div class="mini-hand" id="mini-2"></div>
+    </div>
+    <div class="seat seat-left" id="seat-1">
+      <div class="avatar">Б1<span class="headcount" id="headcount-1">–/0</span><button class="last-trick-btn hidden" id="lasttrick-1" title="Последняя взятка">🂠</button></div>
+      <div class="label" id="label-1">Бот 1</div>
+      <div class="mini-hand" id="mini-1"></div>
+    </div>
+    <div class="seat seat-right" id="seat-3">
+      <div class="avatar">Б3<span class="headcount" id="headcount-3">–/0</span><button class="last-trick-btn hidden" id="lasttrick-3" title="Последняя взятка">🂠</button></div>
+      <div class="label" id="label-3">Бот 3</div>
+      <div class="mini-hand" id="mini-3"></div>
+    </div>
+
+    <div class="trick-zone" id="trickZone"></div>
+
+    <div class="seat seat-you" id="seat-0">
+      <div class="avatar">Вы<span class="headcount" id="headcount-0">–/0</span><button class="last-trick-btn hidden" id="lasttrick-0" title="Последняя взятка">🂠</button></div>
+      <div class="label" id="label-0">Вы</div>
+    </div>
+    <div class="hand-row" id="handRow"></div>
+    <div class="table-dialog hidden" id="tableDialog"></div>
+  </div>
+
+  <div class="controls" id="controls"></div>
+</div>
+
+<footer>Тестовая версия. Очки: 100/150/200(+50) за угаданное число, пас без взяток +50, заявка&gt;0 но 0 взято −200, промах с добором +10×взято, «взял всё» = карт×100. Премия чистой пульки сгорает при 2+ претендентах. После каждого хода — пауза 5 сек., чтобы видеть, кто что скинул. Если джокером забирают взятку ходя первым — игрок обязан заказать старшую карту масти или взять любую без заказа; заказ виден в баннере над столом, а счётчики «запросил / забрал» — в карточке игрока.</footer>
+
+<div class="modal-overlay hidden" id="modalOverlay">
+  <div class="modal" id="modalBox"></div>
+</div>
+
+<script>
+const SUITS = ['♠','♥','♦','♣'];
+const SUIT_NAMES = {'♠':'пики','♥':'черви','♦':'бубны','♣':'крести'};
+const RED_SUITS = ['♥','♦'];
+const RANKS = ['6','7','8','9','10','J','Q','K','A'];
+const NAMES = ['Вы','Бот 1','Бот 2','Бот 3'];
+const MOVE_DELAY = 5000;
+
+// Display order for sorting the human player's hand: hearts, diamonds, clubs, spades,
+// low to high within each suit. Jokers (no suit) are placed after all suited cards.
+const HAND_SUIT_ORDER = {'♥':0, '♦':1, '♣':2, '♠':3};
+function sortHand(hand){
+  return hand.sort((a,b)=>{
+    if(a.joker || b.joker){
+      if(a.joker && b.joker) return a.jid - b.jid;
+      return a.joker ? 1 : -1;
+    }
+    const sa = HAND_SUIT_ORDER[a.suit], sb = HAND_SUIT_ORDER[b.suit];
+    if(sa !== sb) return sa - sb;
+    return a.value - b.value;
+  });
+}
+
+function createDeck(withJokers){
+  const deck=[];
+  for(const s of SUITS){
+    for(let i=0;i<RANKS.length;i++){
+      // Джокер играется без 6♠ и 6♣ — без них 34 карты + 2 джокера = ровно 36 в колоде.
+      if(RANKS[i]==='6' && (s==='♠' || s==='♣')) continue;
+      deck.push({suit:s, rank:RANKS[i], value:i, joker:false});
+    }
+  }
+  if(withJokers){
+    deck.push({joker:true, jid:1, rank:'J1'});
+    deck.push({joker:true, jid:2, rank:'J2'});
+  }
+  return deck;
+}
+function shuffle(arr){
+  for(let i=arr.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [arr[i],arr[j]]=[arr[j],arr[i]];
+  }
+  return arr;
+}
+function buildRoundsLong(){
+  const rounds=[];
+  for(let s=1;s<=8;s++) rounds.push({size:s, mode:'reveal', phase:'1–8'});
+  for(let i=0;i<4;i++) rounds.push({size:9, mode:'choose', phase:'9×4 (I)'});
+  for(let s=8;s>=1;s--) rounds.push({size:s, mode:'reveal', phase:'8–1'});
+  for(let i=0;i<4;i++) rounds.push({size:9, mode:'choose', phase:'9×4 (II)'});
+  return rounds;
+}
+function buildRoundsNines(){
+  // "Только девятки": one pulka is just 4 hands of 9 cards, trump chosen each time.
+  const rounds=[];
+  for(let i=0;i<4;i++) rounds.push({size:9, mode:'choose', phase:'9×4'});
+  return rounds;
+}
+function buildRounds(){
+  return (GAME_MODE==='nines' || GAME_MODE==='nines_short') ? buildRoundsNines() : buildRoundsLong();
+}
+
+let GAME_MODE = 'long';   // 'long' or 'nines' — picked on the setup screen before startGame()
+let PULKA_LIMIT = Infinity; // how many pulkas make up the whole game ('nines' mode caps this at 4)
+let G = null;
+
+// ---------- Локальная заглушка экономики (монеты/скины) ----------
+// Пока не подключён Supabase — храним прямо в памяти вкладки, не сохраняется
+// между визитами. При подключении бэкенда заменить на supabase-client.js.
+let PLAYER_COINS = 1000;
+let EQUIPPED_SKIN = 'classic';
+const OWNED_SKINS = new Set(['classic']);
+const SKINS_CATALOG = [
+  { id:'classic', name:'Классическая колода', price:0, desc:'Стандартный вид карт — доступна всем.', ready:true },
+  { id:'fantasy_knights', name:'Фэнтези: рыцари и драконы', price:1500, desc:'Скоро — иллюстрации в работе.', ready:false },
+];
+let selectedCardKey = null; // tracks the human's tapped-but-not-yet-confirmed card
+function cardKey(c){ return c.joker ? ('J'+c.jid) : (c.suit+c.rank); }
+
+function newPlayer(idx){
+  return {idx, name:NAMES[idx], isHuman: idx===0, hand:[], bid:null, tricks:0,
+          total:0, missedAny:false, pulkaScores:[], orderRequests:0, orderWins:0};
+}
+
+function initGame(){
+  G = {
+    pulkaNum:1,
+    rounds: buildRounds(),
+    roundIdx: 0,
+    dealer: 0,
+    players: [0,1,2,3].map(newPlayer),
+    trumpSuit:null,
+    trumpNone:false,
+    leftover:[],
+    trumpCard:null,
+    biddingOrder:[],
+    biddingPos:0,
+    trick:[],
+    leader:0,
+    jokerOrder:null,
+    history:[],
+    logLines:[],
+    lastTrick:null
+  };
+}
+
+function startGame(){
+  initGame();
+  doAceDraw(()=>{
+    log(`Тузовка определила: сдаёт первым ${NAMES[G.dealer]}.`, true);
+    startRound();
+  });
+}
+
+function doAceDraw(cb){
+  const box = document.getElementById('modalBox');
+  box.innerHTML = `<h2>Тузовка</h2><p>Определяем, кто раздаёт первым — колода раздаётся по кругу, пока не выпадет туз.</p><div id="aceLines"></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  const linesBox = document.getElementById('aceLines');
+  const deck = shuffle(createDeck(false));
+  let turn = Math.floor(Math.random()*4);
+  let i=0;
+  function step(){
+    const card = deck[i];
+    const line = document.createElement('div');
+    line.className = 'ace-line' + (card.rank==='A' ? ' ace-hit' : '');
+    line.textContent = `${NAMES[turn]}: ${card.rank}${card.suit}`;
+    linesBox.appendChild(line);
+    linesBox.scrollTop = linesBox.scrollHeight;
+    if(card.rank==='A'){
+      G.dealer = turn;
+      const doneLine = document.createElement('p');
+      doneLine.style.marginTop='10px';
+      doneLine.innerHTML = `<b style="color:var(--gold)">Туз выпал у ${NAMES[turn]} — он сдаёт первым.</b>`;
+      box.appendChild(doneLine);
+      const btn = document.createElement('button');
+      btn.className='btn'; btn.textContent='Начать игру'; btn.style.marginTop='10px';
+      btn.onclick = ()=>{ document.getElementById('modalOverlay').classList.add('hidden'); cb(); };
+      box.appendChild(btn);
+      return;
+    }
+    turn = (turn+1)%4;
+    i++;
+    setTimeout(step, 350);
+  }
+  step();
+}
+
+function log(msg, hi){
+  // The visible message panel was removed — moves are shown via seat bubbles
+  // and the last-trick button instead. Keep an internal record only.
+  G.logLines.push({msg, hi:!!hi});
+}
+
+function currentRound(){ return G.rounds[G.roundIdx]; }
+
+function startRound(){
+  const r = currentRound();
+  const deck = shuffle(createDeck(true));
+  G.dealDeck = deck; // kept around so a 'choose' round can deal the rest after the trump is picked
+  const hands=[[],[],[],[]];
+  // In a "choose trump" round only the first 3 cards go out before the trump
+  // is picked; the remaining cards are dealt afterwards, in afterTrumpSet().
+  const initialCount = r.mode==='choose' ? 3 : r.size;
+  for(let c=0;c<initialCount;c++){
+    for(let p=0;p<4;p++) hands[p].push(deck.pop());
+  }
+  for(let p=0;p<4;p++){
+    G.players[p].hand = hands[p];
+    G.players[p].bid = null;
+    G.players[p].tricks = 0;
+  }
+  sortHand(G.players[0].hand);
+  G.leftover = deck;
+  G.trumpSuit = null;
+  G.trumpNone = false;
+  G.trumpCard = null;
+  G.trick = [];
+  G.jokerOrder = null;
+
+  log(`— Раздача ${G.roundIdx+1}/${G.rounds.length} (${r.phase}), по ${r.size} карт. Сдаёт ${NAMES[G.dealer]}.`, true);
+
+  if(r.mode==='reveal'){
+    const idx = G.leftover.findIndex(c=>!c.joker);
+    if(idx>=0){
+      G.trumpCard = G.leftover[idx];
+      G.trumpSuit = G.trumpCard.suit;
+    } else {
+      G.trumpNone = true;
+    }
+    log(`Козырь открыт из прикупа: ${G.trumpNone ? 'без козыря' : SUIT_NAMES[G.trumpSuit]+' '+G.trumpSuit}.`);
+    afterTrumpSet();
+  } else {
+    // The trump is always chosen by whoever sits right after the dealer —
+    // this rotates every "choose" round along with the deal, it is never a fixed seat.
+    const chooser = (G.dealer+1)%4;
+    if(chooser===0){
+      showTrumpChoiceUI();
+    } else {
+      setTimeout(()=>{
+        const suit = aiChooseTrump(G.players[chooser].hand);
+        if(suit===null){ G.trumpNone=true; log(`${NAMES[chooser]} объявляет: без козыря.`); }
+        else { G.trumpSuit=suit; log(`${NAMES[chooser]} назначает козырь: ${SUIT_NAMES[suit]} ${suit}.`); }
+        afterTrumpSet();
+        render();
+      }, 700);
+    }
+  }
+  render();
+}
+
+function aiChooseTrump(hand){
+  const counts={};
+  for(const s of SUITS) counts[s]=0;
+  let strength=0, jokers=0;
+  for(const c of hand){
+    if(c.joker){ jokers++; continue;}
+    counts[c.suit]++;
+    if(c.value>=6) strength++;
+  }
+  let best=null, bestScore=-1;
+  for(const s of SUITS){
+    const score = counts[s]*2 + (strength);
+    if(score>bestScore){ bestScore=score; best=s; }
+  }
+  if(counts[best]<=1 && jokers>=1 && Math.random()<0.3) return null;
+  return best;
+}
+
+function afterTrumpSet(){
+  const r = currentRound();
+  if(r.mode==='choose'){
+    // Deal the remaining cards now that trump has been picked from the first 3.
+    const deck = G.dealDeck;
+    const remain = r.size - 3;
+    for(let c=0;c<remain;c++){
+      for(let p=0;p<4;p++) G.players[p].hand.push(deck.pop());
+    }
+    sortHand(G.players[0].hand);
+    G.leftover = deck;
+  }
+  G.biddingOrder = [1,2,3,4].map(i=>(G.dealer+i)%4);
+  G.biddingPos = 0;
+  G.bidsSoFar = [];
+  doBiddingStep();
+}
+
+function doBiddingStep(){
+  render();
+  if(G.biddingPos >= 4){
+    startPlaying();
+    return;
+  }
+  const p = G.biddingOrder[G.biddingPos];
+  const r = currentRound();
+  const isLast = G.biddingPos===3;
+  const sumSoFar = G.bidsSoFar.reduce((a,b)=>a+b,0);
+  const forbidden = isLast ? (r.size - sumSoFar) : null;
+
+  if(G.players[p].isHuman){
+    showBidUI(p, r.size, forbidden);
+  } else {
+    setTimeout(()=>{
+      let bid = aiEstimateBid(G.players[p].hand);
+      bid = Math.max(0, Math.min(r.size, bid));
+      if(forbidden!==null && bid===forbidden){
+        bid = bid>0 ? bid-1 : bid+1;
+        bid = Math.max(0, Math.min(r.size, bid));
+      }
+      commitBid(p, bid);
+    }, 900);
+  }
+}
+
+function aiEstimateBid(hand){
+  let est=0;
+  for(const c of hand){
+    if(c.joker){ est+=0.85; continue; }
+    const isTrump = !G.trumpNone && c.suit===G.trumpSuit;
+    if(isTrump){
+      est += c.value>=6 ? 0.8 : 0.35;
+    } else {
+      if(c.value===8) est+=0.55;
+      else if(c.value===7) est+=0.25;
+    }
+  }
+  return Math.round(est);
+}
+
+function commitBid(p, bid){
+  // Guard: ignore a stale bid button click that no longer matches whose turn it is.
+  if(G.biddingOrder[G.biddingPos] !== p) return;
+  G.players[p].bid = bid;
+  G.bidsSoFar.push(bid);
+  log(`${NAMES[p]} заявляет: ${bid}.`);
+  G.biddingPos++;
+  render();
+  doBiddingStep();
+}
+
+function startPlaying(){
+  G.leader = G.biddingOrder[0];
+  G.trick = [];
+  render();
+  maybeAiTurn();
+}
+
+function ledSuitOfTrick(){
+  for(const t of G.trick){ if(!t.card.joker) return t.card.suit; }
+  return null;
+}
+function legalCards(hand, ledSuit){
+  let base;
+  const jokers = hand.filter(c=>c.joker);
+  if(ledSuit===null){
+    base = hand.slice();
+  } else {
+    const hasSuit = hand.some(c=>!c.joker && c.suit===ledSuit);
+    if(hasSuit){
+      base = hand.filter(c=> c.joker || (!c.joker && c.suit===ledSuit));
+    } else if(!G.trumpNone && G.trumpSuit){
+      // Нет масти хода — обязаны положить козырь, если он есть.
+      const trumps = hand.filter(c=>!c.joker && c.suit===G.trumpSuit);
+      base = trumps.length>0 ? trumps.concat(jokers) : hand.slice();
+    } else {
+      base = hand.slice();
+    }
+  }
+  // Активный заказ джокера (когда забрали взятку джокером и заказали масть):
+  // есть заказанная масть — обязаны скинуть карту этой масти (любую, не обязательно старшую);
+  // нет заказанной масти, но есть козырь — обязаны положить козырь;
+  // нет ни того ни другого — играют любой картой. Джокер разрешён в любом случае.
+  if(G.jokerOrder && G.jokerOrder.suit){
+    const suit = G.jokerOrder.suit;
+    const ofSuit = hand.filter(c=>!c.joker && c.suit===suit);
+    if(ofSuit.length>0){
+      base = ofSuit.concat(jokers);
+    } else if(!G.trumpNone && G.trumpSuit){
+      const trumps = hand.filter(c=>!c.joker && c.suit===G.trumpSuit);
+      base = trumps.length>0 ? trumps.concat(jokers) : hand.slice();
+    } else {
+      base = hand.slice();
+    }
+  }
+  return base;
+}
+
+function maybeAiTurn(){
+  render();
+  if(G.trick.length>=4) return;
+  const turn = (G.leader + G.trick.length) % 4;
+  if(G.players[turn].isHuman){ return; }
+  setTimeout(()=>{
+    // Re-check: if the trick already resolved or the turn moved on while this
+    // timer was pending, don't play a now-stale bot move.
+    if(G.trick.length>=4) return;
+    if((G.leader + G.trick.length) % 4 !== turn) return;
+    const hand = G.players[turn].hand;
+    const ledSuit = ledSuitOfTrick();
+    const legal = legalCards(hand, ledSuit);
+    const wasLeading = G.trick.length===0;
+    const choice = aiChooseCard(turn, hand, legal, ledSuit, wasLeading);
+    playCard(turn, choice.card, choice.action, choice.order);
+  }, MOVE_DELAY);
+}
+
+function aiDecideJokerOrder(pIdx){
+  // Иногда бот просто забирает без заказа.
+  if(Math.random()<0.3) return {suit:null};
+  const hand = G.players[pIdx].hand;
+  const have = new Set(hand.filter(c=>!c.joker).map(c=>c.suit));
+  let candidates = SUITS.filter(s=>!have.has(s));
+  if(candidates.length===0) candidates = SUITS.slice();
+  if(!G.trumpNone && candidates.includes(G.trumpSuit) && Math.random()<0.5){
+    return {suit:G.trumpSuit};
+  }
+  return {suit: candidates[Math.floor(Math.random()*candidates.length)]};
+}
+
+function aiChooseCard(pIdx, hand, legal, ledSuit, wasLeading){
+  const needsMore = G.players[pIdx].tricks < (G.players[pIdx].bid||0);
+  const nonJoker = legal.filter(c=>!c.joker);
+  const jokers = legal.filter(c=>c.joker);
+  if(needsMore){
+    if(jokers.length>0 && Math.random()<0.65){
+      const result = {card: jokers[0], action:'take'};
+      if(wasLeading) result.order = aiDecideJokerOrder(pIdx);
+      return result;
+    }
+    if(nonJoker.length>0){
+      const trumpCards = !G.trumpNone ? nonJoker.filter(c=>c.suit===G.trumpSuit) : [];
+      const pool = trumpCards.length>0 ? trumpCards : nonJoker;
+      pool.sort((a,b)=>b.value-a.value);
+      return {card: pool[0]};
+    }
+    const fallback = {card: jokers[0], action:'take'};
+    if(wasLeading) fallback.order = aiDecideJokerOrder(pIdx);
+    return fallback;
+  } else {
+    const nonTrump = nonJoker.filter(c=> G.trumpNone || c.suit!==G.trumpSuit);
+    const pool = nonTrump.length>0 ? nonTrump : nonJoker;
+    if(pool.length>0){
+      pool.sort((a,b)=>a.value-b.value);
+      return {card: pool[0]};
+    }
+    if(jokers.length>0) return {card: jokers[0], action:'duck'};
+    return {card: legal[0]};
+  }
+}
+
+function playCard(pIdx, card, jokerAction, jokerOrderChoice){
+  // Guard: reject any play that doesn't match whose turn it actually is right now.
+  // This protects against double-clicks or a bot's delayed move landing after
+  // the state has already moved on, which previously could push extra cards
+  // into the trick and freeze the game.
+  if(G.trick.length>=4) return;
+  const expectedTurn = (G.leader + G.trick.length) % 4;
+  if(pIdx !== expectedTurn) return;
+  const hand = G.players[pIdx].hand;
+  const wasLeading = G.trick.length===0;
+  const i = hand.findIndex(c=> c===card || (c.joker && card.joker && c.jid===card.jid) || (!c.joker && !card.joker && c.suit===card.suit && c.rank===card.rank));
+  if(i===-1) return;
+  hand.splice(i,1);
+  G.trick.push({playerIdx:pIdx, card, action: card.joker ? (jokerAction||'take') : null, order:G.trick.length});
+
+  if(card.joker && jokerAction==='take' && wasLeading){
+    const suit = (jokerOrderChoice && jokerOrderChoice.suit) ? jokerOrderChoice.suit : null;
+    G.jokerOrder = {suit, requesterIdx: pIdx};
+    G.players[pIdx].orderRequests = (G.players[pIdx].orderRequests||0) + 1;
+    const desc = suit ? `заказывает масть ${SUIT_NAMES[suit]} ${suit}` : 'забирает любую карту без заказа';
+    log(`${NAMES[pIdx]} ходит джокером и ${desc}!`, true);
+    showSeatBubble(pIdx, suit ? `Заказываю: ${suit}!` : 'Забираю! Без заказа.');
+  } else if(card.joker && jokerAction==='take'){
+    log(`${NAMES[pIdx]} играет джокера (забираю).`);
+    showSeatBubble(pIdx, 'Забираю!');
+  } else if(card.joker && jokerAction==='duck'){
+    log(`${NAMES[pIdx]} играет джокера (ниже).`);
+    showSeatBubble(pIdx, 'Ниже');
+  } else {
+    log(`${NAMES[pIdx]} играет ${cardLabel(card)}.`);
+  }
+  render();
+  if(G.trick.length===4){
+    setTimeout(resolveTrick, MOVE_DELAY);
+  } else {
+    maybeAiTurn();
+  }
+}
+
+function resolveTrick(){
+  const trick = G.trick;
+  let ledSuit=null;
+  for(const t of trick){ if(!t.card.joker){ ledSuit=t.card.suit; break; } }
+  const takeJokers = trick.filter(t=>t.card.joker && t.action==='take');
+  let winner;
+  if(takeJokers.length>0){
+    winner = takeJokers[takeJokers.length-1].playerIdx;
+  } else {
+    const candidates = trick.filter(t=>!t.card.joker);
+    if(candidates.length===0){
+      winner = trick[0].playerIdx;
+    } else {
+      const trumps = !G.trumpNone ? candidates.filter(t=>t.card.suit===G.trumpSuit) : [];
+      let pool = trumps.length>0 ? trumps : candidates.filter(t=>t.card.suit===ledSuit);
+      if(pool.length===0) pool = candidates;
+      pool.sort((a,b)=>b.card.value-a.card.value);
+      winner = pool[0].playerIdx;
+    }
+  }
+  G.players[winner].tricks++;
+  if(G.jokerOrder && winner===G.jokerOrder.requesterIdx){
+    G.players[winner].orderWins = (G.players[winner].orderWins||0) + 1;
+  }
+  log(`Взятку берёт: ${NAMES[winner]}.`, true);
+  G.lastTrick = {winner, cards: trick.map(t=>({playerIdx:t.playerIdx, card:t.card}))};
+  G.trick = [];
+  G.jokerOrder = null;
+  render();
+  const r = currentRound();
+  const totalTricksPlayed = G.players.reduce((a,p)=>a+p.tricks,0);
+  if(totalTricksPlayed >= r.size){
+    setTimeout(endRound, 1200);
+  } else {
+    G.leader = winner;
+    setTimeout(()=>{ render(); maybeAiTurn(); }, 800);
+  }
+}
+
+function scoreRound(bid, took, size){
+  if(bid===took){
+    if(took===size && took>0) return took*100;
+    if(took===0) return 50;
+    return 50*(took+1);
+  } else {
+    if(took===0) return -200;
+    return 10*took;
+  }
+}
+
+function endRound(){
+  const r = currentRound();
+  let breakdown=[];
+  for(const p of G.players){
+    const pts = scoreRound(p.bid, p.tricks, r.size);
+    p.total += pts;
+    p.pulkaScores.push(pts);
+    if(p.bid !== p.tricks) p.missedAny = true;
+    breakdown.push({name:p.name, bid:p.bid, took:p.tricks, pts, total:p.total});
+  }
+  G.history.push({pulka:G.pulkaNum, round:G.roundIdx+1, phase:r.phase, size:r.size, rows:breakdown});
+  showRoundResultModal(breakdown, ()=>{
+    G.roundIdx++;
+    G.dealer = (G.dealer+1)%4;
+    if(G.roundIdx >= G.rounds.length){
+      endPulka();
+    } else {
+      startRound();
+    }
+  });
+}
+
+function endPulka(){
+  const clean = G.players.filter(p=>!p.missedAny);
+  if(clean.length===0){
+    finishPulkaModal('Никто не прошёл пульку без единого промаха — премии нет.');
+  } else if(clean.length>=2){
+    finishPulkaModal(`Премию заслужили сразу несколько игроков (${clean.map(p=>p.name).join(', ')}) — премия сгорает, ничего не начисляется.`);
+  } else {
+    const winner = clean[0];
+    const myMax = Math.max(...winner.pulkaScores);
+    if(winner.isHuman){
+      showBonusChoiceUI(winner, myMax);
+      return;
+    } else {
+      const others = G.players.filter(p=>p.idx!==winner.idx);
+      const otherMaxes = others.map(o=>Math.max(...o.pulkaScores));
+      const totalOtherMax = otherMaxes.reduce((a,b)=>a+b, 0);
+      let msg;
+      if(myMax >= totalOtherMax){
+        winner.total += myMax;
+        msg = `${winner.name} прошёл пульку без единого промаха и продублировал свой лучший результат раздачи: +${myMax}.`;
+      } else {
+        others.forEach((o,i)=>{ o.total -= otherMaxes[i]; });
+        const zeroListStr = others.map((o,i)=>`${o.name} −${otherMaxes[i]}`).join(', ');
+        msg = `${winner.name} прошёл пульку без единого промаха и обнулил лучший результат раздачи всем соперникам: ${zeroListStr}.`;
+      }
+      finishPulkaModal(msg);
+    }
+  }
+}
+
+function finishPulkaModal(msg){
+  const box = document.getElementById('modalBox');
+  const gameOver = G.pulkaNum >= PULKA_LIMIT;
+  box.innerHTML = `<h2>Итог пульки №${G.pulkaNum}${gameOver ? ' — игра окончена' : ''}</h2>
+    <p>${msg}</p>
+    <table class="score-table"><tr><th>Игрок</th><th>Всего очков</th></tr>
+    ${G.players.map(p=>`<tr><td>${p.name}</td><td>${p.total}</td></tr>`).join('')}
+    </table>
+    <div class="controls"><button class="btn" id="nextPulkaBtn">${gameOver ? 'Новая игра' : 'Начать новую пульку'}</button></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  document.getElementById('nextPulkaBtn').onclick = ()=>{
+    document.getElementById('modalOverlay').classList.add('hidden');
+    if(gameOver){ showSetupModal(); } else { startNewPulka(); }
+  };
+  render();
+}
+
+function showBonusChoiceUI(winner, myMax){
+  const others = G.players.filter(p=>p.idx!==winner.idx);
+  const otherMaxes = others.map(o=>Math.max(...o.pulkaScores));
+  const box = document.getElementById('modalBox');
+  const zeroListStr = others.map((o,i)=>`${o.name} −${otherMaxes[i]}`).join(', ');
+  box.innerHTML = `<h2>Премия чистой пульки!</h2>
+    <p>Вы прошли всю пульку без единого промаха. Ваш лучший результат раздачи в этой пульке: <b>${myMax}</b>. Выберите премию:</p>
+    <div class="controls" id="bonusOpts" style="flex-direction:column; align-items:stretch;"></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  const opts = document.getElementById('bonusOpts');
+  const dupBtn = document.createElement('button');
+  dupBtn.className='btn'; dupBtn.textContent = `Продублировать себе (+${myMax})`;
+  dupBtn.onclick = ()=>{
+    winner.total += myMax;
+    document.getElementById('modalOverlay').classList.add('hidden');
+    finishPulkaModal(`Вы продублировали свой лучший результат раздачи: +${myMax}.`);
+  };
+  opts.appendChild(dupBtn);
+  const zeroBtn = document.createElement('button');
+  zeroBtn.className='btn secondary';
+  zeroBtn.textContent = `Обнулить всем лучшую раздачу (${zeroListStr})`;
+  zeroBtn.onclick = ()=>{
+    others.forEach((o,i)=>{ o.total -= otherMaxes[i]; });
+    document.getElementById('modalOverlay').classList.add('hidden');
+    finishPulkaModal(`Вы обнулили лучший результат раздачи всем соперникам: ${zeroListStr}.`);
+  };
+  opts.appendChild(zeroBtn);
+}
+
+function startNewPulka(){
+  G.pulkaNum++;
+  G.rounds = buildRounds();
+  G.roundIdx = 0;
+  for(const p of G.players){
+    p.missedAny=false;
+    p.pulkaScores=[];
+  }
+  log(`Новая пулька №${G.pulkaNum}. Сдаёт: ${NAMES[G.dealer]}.`, true);
+  startRound();
+}
+
+// ---------- UI rendering ----------
+
+function cardLabel(c){
+  if(c.joker) return 'Джокер';
+  return c.rank + c.suit;
+}
+function cardEl(c, opts){
+  opts = opts||{};
+  const d = document.createElement('div');
+  if(opts.back || !c){
+    d.className = 'card back';
+  } else if(c.joker){
+    d.className = 'card joker';
+    d.innerHTML = '🃏';
+  } else {
+    d.className = 'card' + (RED_SUITS.includes(c.suit) ? ' red' : '');
+    d.innerHTML = c.rank + '<br>' + c.suit;
+  }
+  if(opts.playable) d.className += ' playable';
+  if(opts.disabled) d.className += ' disabled';
+  if(opts.selected) d.className += ' selected';
+  return d;
+}
+
+const SEAT_OFFSET = {
+  0: {x:0, y:34},
+  1: {x:-46, y:-6},
+  2: {x:0, y:-46},
+  3: {x:46, y:-6}
+};
+
+function clearSeatBubbles(){
+  document.querySelectorAll('.seat-bubble').forEach(el=>el.remove());
+}
+
+function showSeatBubble(pIdx, text){
+  const seatEl = document.getElementById('seat-'+pIdx);
+  const feltEl = document.querySelector('.table-felt');
+  if(!seatEl || !feltEl) return;
+  const old = document.getElementById('bubble-'+pIdx);
+  if(old){ clearTimeout(old._hideT); old.remove(); }
+  const seatRect = seatEl.getBoundingClientRect();
+  const feltRect = feltEl.getBoundingClientRect();
+  const bubble = document.createElement('div');
+  bubble.className = 'seat-bubble';
+  bubble.id = 'bubble-'+pIdx;
+  bubble.textContent = text;
+  feltEl.appendChild(bubble);
+  const cy = seatRect.top - feltRect.top + seatRect.height/2;
+  let top, left, transform;
+  if(pIdx===2){ // верхнее место — пузырь уходит вверх, за пределы стола
+    top = seatRect.top - feltRect.top - 6;
+    left = seatRect.left - feltRect.left + seatRect.width/2;
+    transform = 'translate(-50%, -100%)';
+  } else if(pIdx===1){ // левое место — пузырь уходит влево
+    top = cy;
+    left = seatRect.left - feltRect.left - 8;
+    transform = 'translate(-100%, -50%)';
+  } else if(pIdx===3){ // правое место — пузырь уходит вправо
+    top = cy;
+    left = seatRect.right - feltRect.left + 8;
+    transform = 'translate(0, -50%)';
+  } else { // ваше место — пузырь сбоку от аватара, не задевая взятку сверху и карты в руке снизу
+    top = cy;
+    left = seatRect.right - feltRect.left + 10;
+    transform = 'translate(0, -50%)';
+  }
+  bubble.style.top = top+'px';
+  bubble.style.left = left+'px';
+  bubble.style.transform = transform;
+  bubble._hideT = setTimeout(()=>{ bubble.remove(); }, 4200);
+}
+
+function render(){
+  if(!G) return;
+  const r = currentRound();
+  if(!r) return; // between pulkas — the results modal is showing, nothing on the table to draw yet
+
+  // scoreboard
+  const sb = document.getElementById('scoreboard');
+  sb.innerHTML='';
+  for(const p of G.players){
+    const div = document.createElement('div');
+    div.className = 'score-card' + (p.isHuman?' you':'') + (G.dealer===p.idx ? ' dealer-tag' : '');
+    const bidStr = p.bid===null ? '' : `заявка ${p.bid} · взято ${p.tricks}`;
+    const orderStr = p.orderRequests>0 ? `🃏 запросил ${p.orderRequests} · забрал ${p.orderWins||0}` : '';
+    div.innerHTML = `<div class="name">${p.name}</div><div class="val">${p.total}</div><div class="bidinfo">${bidStr}</div>${orderStr?`<div class="orderinfo">${orderStr}</div>`:''}`;
+    sb.appendChild(div);
+  }
+
+  // info bar
+  const ib = document.getElementById('infoBar');
+  ib.innerHTML = `<span>Пулька <b>${G.pulkaNum}</b></span>
+    <span>Раздача <b>${G.roundIdx+1}/${G.rounds.length}</b> (${r.phase})</span>
+    <span>Карт: <b>${r.size}</b></span>
+    <span>Сдаёт: <b>${NAMES[G.dealer]}</b></span>`;
+  document.getElementById('trumpBadge').textContent = 'козырь: ' + (G.trumpNone ? 'нет' : (G.trumpSuit ? SUIT_NAMES[G.trumpSuit]+' '+G.trumpSuit : '—'));
+
+  // bidding status row
+  const bidStatusEl = document.getElementById('bidStatus');
+  const inBidding = G.biddingOrder && G.biddingOrder.length===4 && G.biddingPos<4 && G.trick.length===0 && G.players.every(p=>p.tricks===0);
+  if(inBidding){
+    bidStatusEl.classList.remove('hidden');
+    bidStatusEl.innerHTML='';
+    G.biddingOrder.forEach((pIdx, pos)=>{
+      const chip = document.createElement('div');
+      chip.className = 'bid-chip' + (pos===G.biddingPos ? ' active' : '');
+      const bidVal = G.players[pIdx].bid;
+      chip.innerHTML = `${NAMES[pIdx]}: <span class="v">${bidVal===null ? '…' : bidVal}</span>`;
+      bidStatusEl.appendChild(chip);
+    });
+  } else {
+    bidStatusEl.classList.add('hidden');
+  }
+
+  // счётчик заявка/взято прямо на аватаре игрока
+  for(let i=0;i<4;i++){
+    const hc = document.getElementById('headcount-'+i);
+    if(hc) hc.textContent = `${G.players[i].bid===null?'–':G.players[i].bid}/${G.players[i].tricks}`;
+  }
+
+  // joker order banner — заметно показываем, кто и что заказал джокером
+  const orderBanner = document.getElementById('orderBanner');
+  if(G.jokerOrder){
+    const req = G.jokerOrder;
+    orderBanner.classList.remove('hidden');
+    orderBanner.textContent = req.suit
+      ? `🃏 ${NAMES[req.requesterIdx]} забирает джокером и заказывает ${SUIT_NAMES[req.suit]} ${req.suit}: есть эта масть — кладите её; нет масти, но есть козырь — кладите козырь; нет ни того ни другого — любая карта. Джокером можно ходить в любом случае.`
+      : `🃏 ${NAMES[req.requesterIdx]} забирает джокером — заказа нет, все играют что угодно.`;
+  } else {
+    orderBanner.classList.add('hidden');
+    orderBanner.textContent='';
+  }
+
+  // talon
+  const talonEl = document.getElementById('talonZone');
+  talonEl.innerHTML='';
+  if(G.leftover && G.leftover.length>0){
+    const stack = document.createElement('div');
+    stack.className='talon-stack';
+    const backCount = Math.min(G.leftover.length, 4);
+    for(let k=0;k<backCount;k++){
+      const b = cardEl(null,{back:true});
+      b.style.position='absolute'; b.style.top=(k*1.5)+'px'; b.style.left=(k*1.5)+'px';
+      stack.appendChild(b);
+    }
+    if(G.trumpCard){
+      const tc = cardEl(G.trumpCard);
+      tc.style.position='absolute'; tc.style.top=(backCount*1.5+4)+'px'; tc.style.left=(backCount*1.5-6)+'px'; tc.style.transform='rotate(8deg)';
+      stack.appendChild(tc);
+    }
+    talonEl.appendChild(stack);
+    const lab = document.createElement('div');
+    lab.className='talon-label';
+    lab.textContent = `прикуп: ${G.leftover.length}`;
+    talonEl.appendChild(lab);
+  }
+
+  // turn highlighting
+  const activeTurn = (G.trick.length<4) ? (G.leader + G.trick.length)%4 : null;
+  for(let i=0;i<4;i++){
+    const seatEl = document.getElementById('seat-'+i);
+    seatEl.classList.toggle('dealer', G.dealer===i);
+    seatEl.classList.toggle('turn', activeTurn===i);
+  }
+  for(let i=1;i<=3;i++){
+    const mh = document.getElementById('mini-'+i);
+    mh.innerHTML='';
+    for(let k=0;k<G.players[i].hand.length;k++) mh.appendChild(cardEl(null,{back:true}));
+  }
+
+  // last-trick button: only shows on the seat of whoever took the most recent trick
+  for(let i=0;i<4;i++){
+    const ltb = document.getElementById('lasttrick-'+i);
+    if(!ltb) continue;
+    const show = !!(G.lastTrick && G.lastTrick.winner===i);
+    ltb.classList.toggle('hidden', !show);
+    ltb.onclick = (ev)=>{ ev.stopPropagation(); showLastTrickDialog(); };
+  }
+
+  // trick zone (stacked overlapping cards)
+  const tz = document.getElementById('trickZone');
+  tz.innerHTML='';
+  for(const t of G.trick){
+    const wrap = document.createElement('div');
+    wrap.className='trick-card-wrap';
+    const off = SEAT_OFFSET[t.playerIdx];
+    wrap.style.transform = `translate(calc(-50% + ${off.x}px), calc(-50% + ${off.y}px))`;
+    wrap.style.zIndex = 10 + t.order;
+    wrap.appendChild(cardEl(t.card));
+    const lab = document.createElement('div');
+    lab.className='plabel';
+    lab.textContent = NAMES[t.playerIdx];
+    wrap.appendChild(lab);
+    tz.appendChild(wrap);
+  }
+
+  // human hand
+  const hr = document.getElementById('handRow');
+  hr.innerHTML='';
+  const isMyTurn = (G.trick.length<4) && ((G.leader + G.trick.length)%4===0) && G.players[0].hand.length>0 && G.players[0].bid!==null;
+  const ledSuit = ledSuitOfTrick();
+  const legal = isMyTurn ? legalCards(G.players[0].hand, ledSuit) : [];
+  if(!isMyTurn) selectedCardKey = null;
+  for(const c of G.players[0].hand){
+    const playable = isMyTurn && legal.includes(c);
+    const key = cardKey(c);
+    const selected = playable && selectedCardKey===key;
+    const el = cardEl(c, {playable, disabled: isMyTurn && !playable, selected});
+    if(playable){
+      el.onclick = (ev)=>{
+        ev.stopPropagation();
+        if(selectedCardKey === key){
+          // Second tap on the already-selected card confirms the move.
+          selectedCardKey = null;
+          hr.querySelectorAll('.card').forEach(x=>{ x.onclick=null; });
+          if(c.joker){
+            askJokerAction(c);
+          } else {
+            playCard(0, c, null);
+          }
+        } else {
+          // First tap just selects/highlights the card — nothing is played yet.
+          selectedCardKey = key;
+          render();
+        }
+      };
+    }
+    hr.appendChild(el);
+  }
+  layoutHandFan(hr);
+}
+
+// Lays the player's cards out in a single horizontal row, never wrapping.
+// If they don't fit at full width, cards overlap — but always leave enough
+// of each card visible to tap it.
+function layoutHandFan(hr){
+  const cards = Array.from(hr.querySelectorAll('.card'));
+  const n = cards.length;
+  if(n===0) return;
+  const containerWidth = hr.clientWidth || (hr.parentElement ? hr.parentElement.clientWidth - 36 : 300);
+  const cardWidth = 46;
+  const desiredGap = 6;
+  let step = cardWidth + desiredGap;
+  const naturalWidth = cardWidth + (n-1)*step;
+  if(n>1 && naturalWidth > containerWidth){
+    const minVisible = 16; // px of each covered card left showing, so it can still be tapped
+    step = Math.max((containerWidth - cardWidth) / (n-1), minVisible);
+  }
+  cards.forEach((el,i)=>{
+    el.style.marginLeft = i===0 ? '0px' : (step - cardWidth) + 'px';
+    el.style.zIndex = String(10+i);
+  });
+}
+
+function showTableDialog(html){
+  const d = document.getElementById('tableDialog');
+  d.innerHTML = html;
+  d.classList.remove('hidden');
+}
+function hideTableDialog(){
+  const d = document.getElementById('tableDialog');
+  d.classList.add('hidden');
+  d.innerHTML='';
+}
+
+function askJokerAction(card){
+  const leading = G.trick.length===0;
+  showTableDialog(`<p>Хотите забрать эту взятку джокером или сыграть его «ниже»?</p><div class="controls" id="jokerOpts"></div>`);
+  const opts = document.getElementById('jokerOpts');
+  const takeBtn = document.createElement('button');
+  takeBtn.className='btn'; takeBtn.textContent='Забираю';
+  takeBtn.onclick=()=>{
+    if(leading){
+      askJokerOrder(card);
+    } else {
+      hideTableDialog();
+      playCard(0, card, 'take');
+    }
+  };
+  const duckBtn = document.createElement('button');
+  duckBtn.className='btn secondary'; duckBtn.textContent='Ниже';
+  duckBtn.onclick=()=>{ hideTableDialog(); playCard(0, card, 'duck'); };
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className='btn secondary'; cancelBtn.textContent='Отмена';
+  cancelBtn.onclick=()=>{ hideTableDialog(); selectedCardKey=null; render(); };
+  opts.appendChild(takeBtn); opts.appendChild(duckBtn); opts.appendChild(cancelBtn);
+}
+
+function askJokerOrder(card){
+  showTableDialog(`<p>Вы ходите первым и забираете джокером. Закажите масть — или просто берите любую карту без заказа.</p><div class="bid-grid" id="orderOpts"></div>`);
+  const opts = document.getElementById('orderOpts');
+  for(const s of SUITS){
+    const btn = document.createElement('button');
+    btn.className='bid-btn';
+    btn.textContent = s;
+    btn.onclick = ()=>{
+      hideTableDialog();
+      playCard(0, card, 'take', {suit:s});
+    };
+    opts.appendChild(btn);
+  }
+  const anyBtn = document.createElement('button');
+  anyBtn.className='bid-btn';
+  anyBtn.textContent='любая';
+  anyBtn.onclick = ()=>{
+    hideTableDialog();
+    playCard(0, card, 'take', {suit:null});
+  };
+  opts.appendChild(anyBtn);
+  const cancelBtn = document.createElement('button');
+  cancelBtn.className='bid-btn';
+  cancelBtn.textContent='Отмена';
+  cancelBtn.onclick = ()=>{ hideTableDialog(); selectedCardKey=null; render(); };
+  opts.appendChild(cancelBtn);
+}
+
+function showBidUI(pIdx, size, forbidden){
+  const c = document.getElementById('controls');
+  c.innerHTML = `<div style="width:100%; text-align:center; margin-bottom:6px; font-size:0.85rem; color:rgba(242,234,217,0.75);">Ваша заявка на эту раздачу (карт: ${size})${forbidden!==null?' — нельзя заявить '+forbidden+' (сумма сравняется с числом карт):':':'}</div><div class="bid-grid" id="bidGrid"></div>`;
+  const grid = document.getElementById('bidGrid');
+  for(let b=0;b<=size;b++){
+    const btn = document.createElement('button');
+    btn.className='bid-btn' + (b===forbidden ? ' forbidden' : '');
+    btn.textContent = b;
+    if(b===forbidden){
+      btn.disabled = true;
+    } else {
+      btn.onclick = ()=>{ c.innerHTML=''; commitBid(pIdx, b); };
+    }
+    grid.appendChild(btn);
+  }
+}
+
+function showTrumpChoiceUI(){
+  const hand = G.players[0].hand;
+  const preview = hand.slice(0,3);
+  const c = document.getElementById('controls');
+  c.innerHTML = `<div style="width:100%; text-align:center; margin-bottom:6px; font-size:0.85rem;">Вам выбирать козырь. Вот ваши первые 3 карты:</div>
+  <div class="mini-hand" id="previewHand" style="justify-content:center; margin-bottom:8px;"></div>
+  <div class="bid-grid" id="trumpGrid"></div>`;
+  const ph = document.getElementById('previewHand');
+  for(const card of preview){ const el=cardEl(card); el.style.width='40px'; el.style.height='56px'; ph.appendChild(el); }
+  const grid = document.getElementById('trumpGrid');
+  for(const s of SUITS){
+    const btn = document.createElement('button');
+    btn.className='bid-btn';
+    btn.textContent = s;
+    btn.onclick = ()=>{ G.trumpSuit=s; log(`Вы назначаете козырь: ${SUIT_NAMES[s]} ${s}.`); c.innerHTML=''; afterTrumpSet(); render(); };
+    grid.appendChild(btn);
+  }
+  const noneBtn = document.createElement('button');
+  noneBtn.className='bid-btn';
+  noneBtn.textContent='без козыря';
+  noneBtn.onclick = ()=>{ G.trumpNone=true; log('Вы объявляете: без козыря.'); c.innerHTML=''; afterTrumpSet(); render(); };
+  grid.appendChild(noneBtn);
+}
+
+function showRoundResultModal(breakdown, cb){
+  const box = document.getElementById('modalBox');
+  box.innerHTML = `<h2>Итог раздачи ${G.roundIdx+1}/${G.rounds.length}</h2>
+    <table class="score-table"><tr><th>Игрок</th><th>Заявка</th><th>Взято</th><th>Очки</th><th>Всего</th></tr>
+    ${breakdown.map(b=>`<tr><td>${b.name}</td><td>${b.bid}</td><td>${b.took}</td><td>${b.pts>=0?'+':''}${b.pts}</td><td>${b.total}</td></tr>`).join('')}
+    </table>
+    <div class="controls"><button class="btn" id="continueBtn">Далее</button></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  document.getElementById('continueBtn').onclick = ()=>{
+    document.getElementById('modalOverlay').classList.add('hidden');
+    cb();
+  };
+}
+
+function showInventoryModal(){
+  const box = document.getElementById('modalBox');
+  const rows = SKINS_CATALOG.filter(s=>OWNED_SKINS.has(s.id)).map(s=>{
+    const equipped = EQUIPPED_SKIN===s.id;
+    return `<div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--panel-line);">
+      <div><b>${s.name}</b><div style="font-size:0.8rem; color:rgba(242,234,217,0.7);">${s.desc}</div></div>
+      <button class="btn ${equipped?'secondary':''}" data-skin="${s.id}" ${equipped?'disabled':''} style="min-width:120px;">${equipped?'Экипирован':'Экипировать'}</button>
+    </div>`;
+  }).join('');
+  box.innerHTML = `<h2>Инвентарь</h2>
+    <p>Монет: <b style="color:var(--gold);">${PLAYER_COINS}</b></p>
+    <div>${rows}</div>
+    <div class="controls"><button class="btn secondary" id="closeInvBtn">Закрыть</button></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  box.querySelectorAll('button[data-skin]').forEach(btn=>{
+    btn.onclick = ()=>{ EQUIPPED_SKIN = btn.getAttribute('data-skin'); showInventoryModal(); };
+  });
+  document.getElementById('closeInvBtn').onclick = ()=>{
+    document.getElementById('modalOverlay').classList.add('hidden');
+  };
+}
+
+function showShopModal(){
+  const box = document.getElementById('modalBox');
+  const rows = SKINS_CATALOG.map(s=>{
+    const owned = OWNED_SKINS.has(s.id);
+    let action;
+    if(owned){ action = `<button class="btn secondary" disabled style="min-width:120px;">Куплено</button>`; }
+    else if(!s.ready){ action = `<button class="btn secondary" disabled style="min-width:120px;">Скоро</button>`; }
+    else { action = `<button class="btn" data-buy="${s.id}" style="min-width:120px;">Купить · ${s.price}</button>`; }
+    return `<div style="display:flex; justify-content:space-between; align-items:center; padding:10px 0; border-bottom:1px solid var(--panel-line);">
+      <div><b>${s.name}</b><div style="font-size:0.8rem; color:rgba(242,234,217,0.7);">${s.desc}</div></div>
+      ${action}
+    </div>`;
+  }).join('');
+  box.innerHTML = `<h2>Магазин скинов</h2>
+    <p>Монет: <b style="color:var(--gold);">${PLAYER_COINS}</b></p>
+    <div>${rows}</div>
+    <div class="controls"><button class="btn secondary" id="closeShopBtn">Закрыть</button></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  box.querySelectorAll('button[data-buy]').forEach(btn=>{
+    btn.onclick = ()=>{
+      const id = btn.getAttribute('data-buy');
+      const skin = SKINS_CATALOG.find(s=>s.id===id);
+      if(PLAYER_COINS < skin.price) return;
+      PLAYER_COINS -= skin.price;
+      OWNED_SKINS.add(id);
+      showShopModal();
+    };
+  });
+  document.getElementById('closeShopBtn').onclick = ()=>{
+    document.getElementById('modalOverlay').classList.add('hidden');
+  };
+}
+
+function showResultsTableModal(){
+  const box = document.getElementById('modalBox');
+  const pulkaOrder = [];
+  const pulkas = {};
+  for(const h of G.history){
+    if(!pulkas[h.pulka]){ pulkas[h.pulka] = []; pulkaOrder.push(h.pulka); }
+    pulkas[h.pulka].push(h);
+  }
+  let html = '';
+  for(const pn of pulkaOrder){
+    const entries = pulkas[pn];
+    const names = entries[0].rows.map(r=>r.name);
+    const subtotal = names.map(()=>0);
+    html += `<h3 style="color:var(--gold); margin:16px 0 6px; font-size:1rem;">Пулька №${pn}</h3>`;
+    html += `<table class="score-table"><tr><th>Раздача</th>${names.map(n=>`<th>${n}</th>`).join('')}</tr>`;
+    for(const h of entries){
+      html += `<tr><td>${h.size}</td>`;
+      h.rows.forEach((row,i)=>{
+        html += `<td>${row.pts>=0?'+':''}${row.pts}</td>`;
+        subtotal[i] += row.pts;
+      });
+      html += `</tr>`;
+    }
+    html += `<tr style="font-weight:700; border-top:2px solid var(--panel-line);"><td>Итого за пульку</td>${subtotal.map(s=>`<td>${s>=0?'+':''}${s}</td>`).join('')}</tr>`;
+    html += `</table>`;
+  }
+  if(G.history.length===0) html = `<p>Пока сыграно 0 раздач.</p>`;
+  box.innerHTML = `<h2>Таблица результатов</h2>
+    <div style="max-height:65vh; overflow-y:auto;">${html}</div>
+    <div class="controls"><button class="btn secondary" id="closeResultsBtn">Закрыть</button></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  document.getElementById('closeResultsBtn').onclick = ()=>{
+    document.getElementById('modalOverlay').classList.add('hidden');
+  };
+}
+
+function showLastTrickDialog(){
+  if(!G.lastTrick) return;
+  const box = document.getElementById('modalBox');
+  const cardsHtml = G.lastTrick.cards.map(t=>{
+    const el = cardEl(t.card);
+    el.style.margin = '0 auto';
+    return `<div style="display:inline-block; text-align:center; margin:6px 8px;">${el.outerHTML}<div style="font-size:0.7rem; margin-top:4px; color:rgba(242,234,217,0.85);">${NAMES[t.playerIdx]}</div></div>`;
+  }).join('');
+  box.innerHTML = `<h2>Последняя взятка</h2>
+    <div style="display:flex; flex-wrap:wrap; justify-content:center;">${cardsHtml}</div>
+    <p style="text-align:center; margin-top:10px;">Забрал: <b style="color:var(--gold);">${NAMES[G.lastTrick.winner]}</b></p>
+    <div class="controls"><button class="btn secondary" id="closeLastTrickBtn">Закрыть</button></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  document.getElementById('closeLastTrickBtn').onclick = ()=>{
+    document.getElementById('modalOverlay').classList.add('hidden');
+  };
+}
+
+document.getElementById('restartBtn').onclick = ()=>{
+  if(confirm('Начать игру заново? Текущий прогресс будет потерян.')){
+    document.getElementById('modalOverlay').classList.add('hidden');
+    showSetupModal();
+  }
+};
+document.getElementById('fullscreenBtn').onclick = ()=>{
+  if(!document.fullscreenElement){
+    document.documentElement.requestFullscreen().catch(()=>{});
+  } else {
+    document.exitFullscreen().catch(()=>{});
+  }
+};
+
+// Tapping anywhere on the table other than the selected card cancels the selection
+// (the card is not played) instead of confirming a move.
+document.querySelector('.table-felt').addEventListener('click', ()=>{
+  if(selectedCardKey){
+    selectedCardKey = null;
+    render();
+  }
+});
+
+function showSetupModal(){
+  const box = document.getElementById('modalBox');
+  box.innerHTML = `<h2>Новая игра</h2>
+    <p>Выберите формат:</p>
+    <div class="controls" id="setupOpts" style="flex-direction:column; align-items:stretch;"></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  const opts = document.getElementById('setupOpts');
+
+  const longBtn = document.createElement('button');
+  longBtn.className='btn';
+  longBtn.textContent='Длинная игра (1–8, девятки×4, 8–1, девятки×4)';
+  longBtn.onclick = ()=>{
+    GAME_MODE='long'; PULKA_LIMIT=Infinity;
+    document.getElementById('modalOverlay').classList.add('hidden');
+    startGame();
+  };
+
+  const ninesBtn = document.createElement('button');
+  ninesBtn.className='btn secondary';
+  ninesBtn.textContent='Только девятки — 4 пульки по 4 раздачи';
+  ninesBtn.onclick = ()=>{
+    GAME_MODE='nines'; PULKA_LIMIT=4;
+    document.getElementById('modalOverlay').classList.add('hidden');
+    startGame();
+  };
+
+  const shortBtn = document.createElement('button');
+  shortBtn.className='btn secondary';
+  shortBtn.textContent='Короткий Джокер — 1 пулька, 4 раздачи девяток';
+  shortBtn.onclick = ()=>{
+    GAME_MODE='nines_short'; PULKA_LIMIT=1;
+    document.getElementById('modalOverlay').classList.add('hidden');
+    startGame();
+  };
+
+  opts.appendChild(longBtn);
+  opts.appendChild(ninesBtn);
+  opts.appendChild(shortBtn);
+}
+
+document.getElementById('resultsTableBtn').onclick = showResultsTableModal;
+document.getElementById('inventoryBtn').onclick = showInventoryModal;
+document.getElementById('shopBtn').onclick = showShopModal;
+
+showSetupModal();
+</script>
+</body>
+</html>
