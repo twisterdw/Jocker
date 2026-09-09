@@ -1,0 +1,32 @@
+name: Build Yandex Games zip
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Если нужна сборка (npm run build) — раскомментировать:
+      # - uses: actions/setup-node@v4
+      #   with:
+      #     node-version: 20
+      # - run: npm ci
+      # - run: npm run build
+
+      # Сборки нет (чистый HTML/JS) — зипуем корень репозитория,
+      # исключая служебные файлы гита/воркфлоу и сам схемный SQL.
+      - name: Zip build folder
+        run: |
+          zip -r yandex-build.zip . \
+            -x ".git/*" ".github/*" "*.md" "supabase_schema.sql"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: yandex-build
+          path: yandex-build.zip
