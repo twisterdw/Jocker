@@ -13,22 +13,14 @@ const SUPABASE_ANON_KEY = 'sb_publishable_Tp20aGRSoVziJZ1rGIo5og_Gqt7QDQS';
 export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // ---------- Профиль ----------
+// Создание/чтение идёт через rpc (security definer) — прямой insert
+// в profiles блокируется RLS-политикой (только чтение разрешено напрямую).
 export async function ensureProfile(yandexId, displayName) {
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('yandex_id', yandexId)
-    .maybeSingle();
+  const { data, error } = await supabase.rpc('fn_ensure_profile', {
+    p_yandex_id: yandexId, p_display_name: displayName,
+  });
   if (error) throw error;
-  if (data) return data;
-
-  const { data: created, error: insErr } = await supabase
-    .from('profiles')
-    .insert({ yandex_id: yandexId, display_name: displayName, equipped_skin_id: 'classic', coins: 1000 })
-    .select()
-    .single();
-  if (insErr) throw insErr;
-  return created;
+  return data;
 }
 
 export async function getProfile(yandexId) {
@@ -66,8 +58,7 @@ export async function buySkin(yandexId, skinId) {
 }
 
 export async function equipSkin(yandexId, skinId) {
-  const { error } = await supabase.from('profiles').update({ equipped_skin_id: skinId }).eq('yandex_id', yandexId);
-  // Если понадобится строже — вынести и это в rpc-функцию с проверкой владения скином.
+  const { error } = await supabase.rpc('fn_equip_skin', { p_yandex_id: yandexId, p_skin_id: skinId });
   if (error) throw error;
 }
 
