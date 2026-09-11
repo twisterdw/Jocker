@@ -545,6 +545,35 @@ function armTurnTimer(key, onTimeout, durationMs){
 // дедлайном; как только вкладка снова становится видимой (или срабатывает
 // периодический сторож ниже), все просроченные шаги выполняются немедленно,
 // а не ждут, пока браузер решит наконец дать таймеру сработать.
+// ---------- Видимая диагностика падений движка ----------
+// Раньше любая необработанная JS-ошибка внутри отложенного шага (авто-ход
+// бота, розыгрыш взятки и т.п.) просто тихо обрывала эту функцию и застревала
+// там навсегда — ни в интерфейсе, ни в логе игры (он не показывается
+// пользователю, см. log()) это никак не было видно, поэтому баг было
+// невозможно ни поймать, ни диагностировать по скриншоту от игрока. Теперь
+// такая ошибка ловится и показывается прямо на экране красной плашкой сверху
+// — если стол снова "замрёт", достаточно скриншота этой плашки.
+function showEngineError(where, err){
+  try{
+    console.error('[Joker engine]', where, err);
+    let el = document.getElementById('engineErrorBanner');
+    if(!el){
+      el = document.createElement('div');
+      el.id = 'engineErrorBanner';
+      el.style.cssText = 'position:fixed; top:0; left:0; right:0; z-index:99999; background:#7a1414; color:#fff; font:12px/1.4 monospace; padding:8px 10px; max-height:40vh; overflow:auto; white-space:pre-wrap; word-break:break-word;';
+      document.body.appendChild(el);
+    }
+    const line = document.createElement('div');
+    line.style.cssText='border-top:1px solid rgba(255,255,255,0.3); padding-top:4px; margin-top:4px;';
+    line.textContent = `[${new Date().toLocaleTimeString()}] ${where}: ${err && err.message ? err.message : err}` + (err && err.stack ? '\n'+err.stack : '');
+    el.appendChild(line);
+  }catch(e){ /* даже диагностика не должна уронить игру */ }
+}
+if(typeof window!=='undefined'){
+  window.addEventListener('error', (e)=> showEngineError('window.onerror', e.error||e.message));
+  window.addEventListener('unhandledrejection', (e)=> showEngineError('unhandledrejection', e.reason));
+}
+
 let PENDING_TIMERS = [];
 function scheduleOnce(fn, ms){
   let fired = false;
@@ -552,7 +581,7 @@ function scheduleOnce(fn, ms){
     if(fired) return;
     fired = true;
     PENDING_TIMERS = PENDING_TIMERS.filter(t=>t.run!==run);
-    fn();
+    try{ fn(); }catch(err){ showEngineError('scheduleOnce', err); }
   };
   const id = setTimeout(run, ms);
   PENDING_TIMERS.push({ deadline: Date.now()+ms, run, id });
@@ -619,7 +648,19 @@ function initGame(){
     history:[],
     logLines:[],
     lastTrick:null,
-    phase:'between'
+    phase:'between',
+    // БАГ (исправлено): раньше "конец игры" по сети вычислялся на лету как
+    // G.pulkaNum>=PULKA_LIMIT && G.phase==='between'. Проблема в том, что
+    // ЭТО ЖЕ САМОЕ условие истинно и в САМОМ НАЧАЛЕ игры на 1 пульку —
+    // pulkaNum стартует с 1, phase стартует как 'between', и если хост
+    // успевал разослать состояние в этот переходный миг (например, из-за
+    // presence-переотправки при подключении гостя, ещё до того как
+    // startRound() перевёл phase в 'trump'), гость немедленно получал
+    // "Игра окончена", хотя у хоста игра продолжалась как ни в чём не
+    // бывало. Явный флаг matchOver ставится только один раз — там, где
+    // реально подводится итог последней пульки (см. finishPulkaModal) — и
+    // никогда не может стать true случайно из-за временного состояния.
+    matchOver:false
   };
 }
 
@@ -1034,7 +1075,7 @@ function serializeStateForWire(){
     freeTrick:G.freeTrick,
     lastTrick: G.lastTrick ? {winner:toDb(G.lastTrick.winner), cards:G.lastTrick.cards.map(c=>({playerIdx:toDb(c.playerIdx), card:c.card}))} : null,
     players: playersDb,
-    gameOver: G.pulkaNum >= PULKA_LIMIT && G.phase==='between',
+    gameOver: !!G.matchOver,
   };
 }
 
@@ -1345,6 +1386,7 @@ function endPulka(){
 function finishPulkaModal(msg){
   const box = document.getElementById('modalBox');
   const gameOver = G.pulkaNum >= PULKA_LIMIT;
+  G.matchOver = gameOver; // см. комментарий в initGame() — единственное место, где это должно выставляться
   box.innerHTML = `<h2>Итог пульки №${G.pulkaNum}${gameOver ? ' — игра окончена' : ''}</h2>
     <p>${msg}</p>
     <table class="score-table"><tr><th>Игрок</th><th>Всего очков</th></tr>
