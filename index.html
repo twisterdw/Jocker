@@ -533,6 +533,46 @@ function armTurnTimer(key, onTimeout, durationMs){
   turnTimer.intervalId = setInterval(tick, 250);
 }
 
+// ---------- Подстраховка от "фоновых" таймеров ----------
+// На телефонах (особенно iOS Safari) браузер сильно замедляет или полностью
+// приостанавливает setTimeout, когда вкладка/приложение свёрнуто или экран
+// заблокирован. Если это происходит на устройстве ХОСТА (а именно хост
+// ведёт всю игровую логику и таймеры авто-хода ботов/заявок), стол может
+// казаться "зависшим — ждём бота" сколь угодно долго, хотя по игровым
+// правилам решение должно было наступить через 10/30 секунд. Чтобы это не
+// зависело от того, доживёт ли конкретный setTimeout до своего срока вовремя,
+// каждый такой отложенный игровой шаг регистрируется здесь с АБСОЛЮТНЫМ
+// дедлайном; как только вкладка снова становится видимой (или срабатывает
+// периодический сторож ниже), все просроченные шаги выполняются немедленно,
+// а не ждут, пока браузер решит наконец дать таймеру сработать.
+let PENDING_TIMERS = [];
+function scheduleOnce(fn, ms){
+  let fired = false;
+  const run = ()=>{
+    if(fired) return;
+    fired = true;
+    PENDING_TIMERS = PENDING_TIMERS.filter(t=>t.run!==run);
+    fn();
+  };
+  const id = setTimeout(run, ms);
+  PENDING_TIMERS.push({ deadline: Date.now()+ms, run, id });
+  return id;
+}
+function catchUpTimers(){
+  const now = Date.now();
+  PENDING_TIMERS.filter(t=>t.deadline<=now).forEach(t=>t.run());
+}
+if(typeof document!=='undefined'){
+  document.addEventListener('visibilitychange', ()=>{
+    if(document.visibilityState==='visible') catchUpTimers();
+  });
+  // Второй, независимый от visibilitychange, сторож — на некоторых Android-
+  // браузерах это событие само может запаздывать. Раз в 2 секунды безвредно
+  // проверяем, не пора ли уже досрочно доиграть просроченный шаг за бота/
+  // отошедшего игрока.
+  setInterval(catchUpTimers, 2000);
+}
+
 // Сторож хода для чужого (не моего) места — актуально только хосту онлайн-
 // стола: если удалённый игрок не прислал решение вовремя, хост играет за
 // него сам и помечает место "away", пока тот не вернётся ("Я тут"). Ход
@@ -544,7 +584,7 @@ function armDecisionWatch(seat, key, onTimeout, durationMs){
   if(NET.remoteTimers[seat] === key) return;
   if(NET.remoteTimeoutIds[seat]) clearTimeout(NET.remoteTimeoutIds[seat]);
   NET.remoteTimers[seat] = key;
-  NET.remoteTimeoutIds[seat] = setTimeout(()=>{
+  NET.remoteTimeoutIds[seat] = scheduleOnce(()=>{
     NET.remoteTimers[seat] = null;
     onTimeout();
   }, durationMs || TURN_TIMER_MS);
@@ -557,6 +597,7 @@ function clearDecisionWatch(seat){
     NET.remoteTimers[seat] = null;
   }
 }
+
 
 function initGame(){
   G = {
@@ -701,7 +742,7 @@ function startRound(){
         broadcastStateIfHost();
       }, TRUMP_BID_TIMER_MS);
     } else {
-      setTimeout(()=>{ autoTrumpFor(chooser); broadcastStateIfHost(); }, 700);
+      scheduleOnce(()=>{ autoTrumpFor(chooser); broadcastStateIfHost(); }, 700);
     }
   }
   render();
@@ -785,7 +826,7 @@ function doBiddingStep(){
       commitBid(p, autoBidFor(p));
     }, TRUMP_BID_TIMER_MS);
   } else {
-    setTimeout(()=>{ commitBid(p, autoBidFor(p)); }, 900);
+    scheduleOnce(()=>{ commitBid(p, autoBidFor(p)); }, 900);
   }
 }
 
@@ -894,7 +935,7 @@ function maybeAiTurn(){
     }
     return;
   }
-  setTimeout(()=>{
+  scheduleOnce(()=>{
     // Re-check: if the trick already resolved or the turn moved on while this
     // timer was pending, don't play a now-stale bot move.
     if(G.trick.length>=4) return;
@@ -1153,7 +1194,7 @@ function playCard(pIdx, card, jokerAction, jokerOrderChoice){
   syncAllHands();
   broadcastStateIfHost();
   if(G.trick.length===4){
-    setTimeout(resolveTrick, MOVE_DELAY);
+    scheduleOnce(resolveTrick, MOVE_DELAY);
   } else {
     maybeAiTurn();
   }
@@ -1229,10 +1270,10 @@ function resolveTrick(){
   const r = currentRound();
   const totalTricksPlayed = G.players.reduce((a,p)=>a+p.tricks,0);
   if(totalTricksPlayed >= r.size){
-    setTimeout(endRound, 1200);
+    scheduleOnce(endRound, 1200);
   } else {
     G.leader = winner;
-    setTimeout(()=>{ render(); maybeAiTurn(); }, 800);
+    scheduleOnce(()=>{ render(); maybeAiTurn(); }, 800);
   }
 }
 
