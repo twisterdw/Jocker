@@ -351,7 +351,7 @@ import { initYandexSDK, markGameReady, getYandexId, getPlayerName } from './yand
 import {
   ensureProfile, listSkins, listOwnedSkins, buySkin as buySkinRemote, equipSkin as equipSkinRemote,
   addCoins, STAKE_TIERS, findOrCreateTable, listTablePlayers, fillRemainingSeatsWithBots, leaveTable,
-  getTableInfo, cancelTableAndRefund,
+  getTableInfo, cancelTableAndRefund, finalizeTableSearch, leaveSearchAndRefund, touchLastSeen,
   chargeStakeEntry, settleStakeSession,
   openGameChannel, broadcastGameState, sendGameMove, openHandChannel, sendHandTo,
 } from './supabase-client.js';
@@ -2001,11 +2001,20 @@ async function beginStakeFlow(stake, pulkas, cost){
 // стол отменяется и ставка возвращается. Если наберётся 2, 3 или 4 живых
 // игрока, оставшиеся места (если есть) тут же занимают боты, и игра
 // начинается без дальнейшего ожидания.
+//
+// Решение "начать игру ботами / отменить стол по таймауту" принимает
+// сервер (fn_finalize_table_search) атомарно, а не какой-то конкретный
+// клиент — эту функцию дёргают ВСЕ клиенты за столом (и автор, и
+// подключившиеся) каждую секунду. Она безопасна при параллельных вызовах:
+// реальную работу выполнит только тот вызов, который первым захватит
+// блокировку строки стола, у остальных это no-op. Благодаря этому стол
+// больше не виснет навсегда, если конкретно вкладка автора свернулась —
+// подсядет и завершит стол любой из оставшихся клиентов.
 function showSearchingModal(tableId, mySeat, stake, pulkas, cost, isCreator, searchDeadline){
   const box = document.getElementById('modalBox');
   box.innerHTML = `<h2>Идёт поиск игроков…</h2>
     <p>Стол на ${stake} монет/пулька, ${pulkas>1?pulkas+' пульки':'1 пулька'}. Живых игроков за столом: <b id="seatsFilled">1</b>/4.</p>
-    <p style="font-size:0.85rem; color:rgba(242,234,217,0.7);" id="searchHint">${isCreator ? 'Нужно минимум 2 живых игрока. Не наберётся за минуту — ставка вернётся автоматически. Если наберётся — оставшиеся места тут же займут боты.' : 'Ждём, пока автор стола наберёт минимум 2 живых игроков — время общее для всех за этим столом.'}</p>
+    <p style="font-size:0.85rem; color:rgba(242,234,217,0.7);" id="searchHint">${isCreator ? 'Вы создали этот стол. Нужно минимум 2 живых игрока. Не наберётся за минуту — ставка вернётся автоматически. Если наберётся — оставшиеся места тут же займут боты.' : 'Ждём, пока наберётся минимум 2 живых игрока — время общее для всех за этим столом.'}</p>
     <p>⏳ Осталось: <b id="searchCountdown">60</b> сек</p>
     <div class="controls"><button class="btn secondary" id="cancelSearchBtn">Отменить и вернуть монеты</button></div>`;
   document.getElementById('modalOverlay').classList.remove('hidden');
@@ -2014,9 +2023,11 @@ function showSearchingModal(tableId, mySeat, stake, pulkas, cost, isCreator, sea
   const filledEl = document.getElementById('seatsFilled');
   let finished = false;
 
-  // Единый дедлайн (записан в game_tables автором при создании стола) —
-  // и автор, и подключившиеся считают реальный отсчёт от одной и той же
-  // отметки времени, а не каждый от своего локального "60".
+  // Единый дедлайн (записан в game_tables при создании стола) — все
+  // клиенты за этим столом считают реальный отсчёт от одной и той же
+  // отметки времени, а не каждый от своего локального "60"; при каждом
+  // опросе статуса ниже он же подтягивается заново из БД на случай
+  // рассинхрона локальных часов устройства.
   let deadlineMs = searchDeadline ? new Date(searchDeadline).getTime() : (Date.now()+60000);
 
   function tickCountdown(){
@@ -2027,102 +2038,56 @@ function showSearchingModal(tableId, mySeat, stake, pulkas, cost, isCreator, sea
   const displayTimer = setInterval(tickCountdown, 1000);
   tickCountdown();
 
-  if(isCreator){
-    // Автор стола — единственный, кто решает, когда добавлять ботов/отменять
-    // стол (по истечении общего дедлайна). Остальные подключившиеся просто
-    // ждут смены статуса стола (см. ветку !isCreator ниже) — так исключается
-    // гонка, когда несколько клиентов одновременно финализируют один стол.
-    const poll = setInterval(async ()=>{
-      if(finished) return;
-      let players;
-      try{ players = await listTablePlayers(tableId); }catch(e){ return; }
-      filledEl.textContent = String(players.length);
-      if(players.length>=4){ finish(players); return; }
-      if(Date.now() >= deadlineMs){
-        if(players.length>=2){ finish(players); }
-        else { cancelAndRefund(); }
-      }
-    }, 1000);
+  // Heartbeat: пока мы сидим в поиске, регулярно отмечаемся как "живые",
+  // чтобы finalize на сервере не принял нас за отключившегося "призрака"
+  // и не освободил наше место, если наша вкладка на секунду подвиснет.
+  touchLastSeen(tableId, mySeat).catch(()=>{});
+  const heartbeat = setInterval(()=>{ if(!finished) touchLastSeen(tableId, mySeat).catch(()=>{}); }, 4000);
 
-    async function finish(players){
-      if(finished) return;
-      finished = true;
-      clearInterval(poll); clearInterval(displayTimer);
-      document.getElementById('modalOverlay').classList.add('hidden');
-      const finalPlayers = await fillRemainingSeatsWithBots(tableId, players);
-      startOnlineGame(tableId, mySeat, finalPlayers);
-    }
-    async function cancelAndRefund(){
-      if(finished) return;
-      finished = true;
-      clearInterval(poll); clearInterval(displayTimer);
-      try{ await cancelTableAndRefund(tableId); }catch(e){ console.error('Не удалось отменить стол:', e); }
-      try{
-        const profile = await ensureProfile(YANDEX_ID, getPlayerName());
-        PLAYER_COINS = Number(profile.coins)||0;
-      }catch(e){ PLAYER_COINS += cost; }
-      STAKE = null;
-      alert('Не набралось достаточно живых игроков за минуту. Монеты возвращены.');
-      showLobby();
-    }
-    document.getElementById('cancelSearchBtn').onclick = async ()=>{
-      if(finished) return;
-      finished = true;
-      clearInterval(poll); clearInterval(displayTimer);
-      try{ await cancelTableAndRefund(tableId); }catch(e){ console.error(e); }
-      try{
-        const profile = await ensureProfile(YANDEX_ID, getPlayerName());
-        PLAYER_COINS = Number(profile.coins)||0;
-      }catch(e){ PLAYER_COINS += cost; }
-      STAKE = null;
-      showLobby();
-    };
-  } else {
-    // Подключившийся (не автор) — решение не принимает, только смотрит на
-    // тот же дедлайн (для отсчёта на экране) и опрашивает статус стола:
-    // 'playing' — автор набрал игроков и подсадил ботов, входим в игру;
-    // 'cancelled' — автор не набрал минимум, деньги всем уже вернул сервер.
-    const poll = setInterval(async ()=>{
-      if(finished) return;
-      let info, players;
-      try{
-        info = await getTableInfo(tableId);
-        players = await listTablePlayers(tableId);
-      }catch(e){ return; }
-      if(!info){ return; }
-      if(info.search_deadline) deadlineMs = new Date(info.search_deadline).getTime();
-      filledEl.textContent = String(players.filter(p=>!p.is_bot).length);
-      if(info.status==='playing'){
-        finished = true;
-        clearInterval(poll); clearInterval(displayTimer);
-        document.getElementById('modalOverlay').classList.add('hidden');
-        startOnlineGame(tableId, mySeat, players);
-      } else if(info.status==='cancelled'){
-        finished = true;
-        clearInterval(poll); clearInterval(displayTimer);
-        try{
-          const profile = await ensureProfile(YANDEX_ID, getPlayerName());
-          PLAYER_COINS = Number(profile.coins)||0;
-        }catch(e){}
-        STAKE = null;
-        alert('Стол отменён автором (не набралось игроков). Монеты возвращены.');
-        showLobby();
-      }
-    }, 1000);
-
-    document.getElementById('cancelSearchBtn').onclick = async ()=>{
-      if(finished) return;
-      finished = true;
-      clearInterval(poll); clearInterval(displayTimer);
-      await leaveTable(tableId, mySeat).catch(()=>{});
-      try{
-        await addCoins(YANDEX_ID, cost, 'stake_refund', {table_id: tableId, reason:'Игрок отменил поиск'});
-        PLAYER_COINS += cost;
-      }catch(e){ console.error('Не удалось вернуть монеты автоматически:', e); }
-      STAKE = null;
-      showLobby();
-    };
+  async function goToLobbyWithRefreshedBalance(){
+    try{
+      const profile = await ensureProfile(YANDEX_ID, getPlayerName());
+      PLAYER_COINS = Number(profile.coins)||0;
+    }catch(e){}
+    STAKE = null;
+    showLobby();
   }
+
+  const poll = setInterval(async ()=>{
+    if(finished) return;
+    let status, info, players;
+    try{
+      status = await finalizeTableSearch(tableId);
+      info = await getTableInfo(tableId);
+      players = await listTablePlayers(tableId);
+    }catch(e){ return; }
+    if(info && info.search_deadline) deadlineMs = new Date(info.search_deadline).getTime();
+    if(players) filledEl.textContent = String(players.filter(p=>!p.is_bot).length);
+
+    if(status==='playing'){
+      finished = true;
+      clearInterval(poll); clearInterval(displayTimer); clearInterval(heartbeat);
+      document.getElementById('modalOverlay').classList.add('hidden');
+      startOnlineGame(tableId, mySeat, players);
+    } else if(status==='cancelled'){
+      finished = true;
+      clearInterval(poll); clearInterval(displayTimer); clearInterval(heartbeat);
+      alert('Не набралось достаточно живых игроков за минуту. Монеты возвращены.');
+      goToLobbyWithRefreshedBalance();
+    }
+  }, 1000);
+
+  // Выйти можно в любой момент — снимается только СВОЁ место и
+  // возвращается только СВОЯ ставка; на остальных живых игроков за этим
+  // же столом это не влияет (см. fn_leave_search_and_refund).
+  document.getElementById('cancelSearchBtn').onclick = async ()=>{
+    if(finished) return;
+    finished = true;
+    clearInterval(poll); clearInterval(displayTimer); clearInterval(heartbeat);
+    try{ await leaveSearchAndRefund(YANDEX_ID, tableId); }
+    catch(e){ console.error('Не удалось выйти из поиска:', e); }
+    await goToLobbyWithRefreshedBalance();
+  };
 }
 
 // Стол собран (2-4 живых игрока + возможно боты на оставшихся местах) —
