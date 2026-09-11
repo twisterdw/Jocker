@@ -257,6 +257,22 @@
   .ace-line.ace-hit{color:var(--gold); font-weight:700;}
   .hidden{display:none !important;}
   footer{margin-top:16px; font-size:0.7rem; color:rgba(242,234,217,0.4); text-align:center; max-width:600px;}
+
+  .stake-grid{display:grid; grid-template-columns:repeat(2,1fr); gap:8px;}
+  .stake-tile{flex-direction:column; padding:10px 6px; line-height:1.3;}
+  .stake-tile .t-num{font-weight:700;}
+  .stake-tile .t-cost{font-size:0.72rem; font-weight:400; opacity:0.85;}
+
+  .turn-timer-badge{
+    display:inline-block; margin:0 0 8px; padding:4px 10px; border-radius:20px;
+    background:rgba(163,39,58,0.25); border:1px solid var(--red); color:var(--cream);
+    font-size:0.78rem; font-weight:700;
+  }
+  .away-banner{
+    display:flex; align-items:center; justify-content:center; gap:10px; flex-wrap:wrap;
+    background:rgba(163,39,58,0.22); border:1px solid var(--red); border-radius:12px;
+    padding:8px 12px; margin-bottom:10px; font-size:0.82rem; text-align:center;
+  }
 </style>
 </head>
 <body>
@@ -284,6 +300,11 @@
   <div class="bid-status hidden" id="bidStatus"></div>
 
   <div class="order-banner hidden" id="orderBanner"></div>
+
+  <div class="away-banner hidden" id="awayBanner">
+    🤖 Вы не успели походить вовремя — бот играет за вас.
+    <button class="btn secondary" id="imHereBtn">Я тут!</button>
+  </div>
 
   <div class="table-felt">
     <div class="trump-badge" id="trumpBadge">козырь: —</div>
@@ -315,6 +336,7 @@
     <div class="table-dialog hidden" id="tableDialog"></div>
   </div>
 
+  <div style="text-align:center;"><span class="turn-timer-badge hidden" id="turnTimerBadge"></span></div>
   <div class="controls" id="controls"></div>
 </div>
 
@@ -326,7 +348,12 @@
 
 <script type="module">
 import { initYandexSDK, markGameReady, getYandexId, getPlayerName } from './yandex-sdk.js';
-import { ensureProfile, listSkins, listOwnedSkins, buySkin as buySkinRemote, equipSkin as equipSkinRemote } from './supabase-client.js';
+import {
+  ensureProfile, listSkins, listOwnedSkins, buySkin as buySkinRemote, equipSkin as equipSkinRemote,
+  addCoins, STAKE_TIERS, findOrCreateTable, listTablePlayers, fillRemainingSeatsWithBots, leaveTable,
+  chargeStakeEntry, settleStakeSession, subscribeToTable,
+  openGameChannel, broadcastGameState, sendGameMove, openHandChannel, sendHandTo,
+} from './supabase-client.js';
 const SUITS = ['♠','♥','♦','♣'];
 const SUIT_NAMES = {'♠':'пики','♥':'черви','♦':'бубны','♣':'крести'};
 const RED_SUITS = ['♥','♦'];
@@ -393,6 +420,18 @@ let GAME_MODE = 'long';   // 'long' or 'nines' — picked on the setup screen be
 let PULKA_LIMIT = Infinity; // how many pulkas make up the whole game ('nines' mode caps this at 4)
 let G = null;
 
+// ---------- Ставки / стол / онлайн ----------
+// STAKE — не null, если текущая сессия играется на монеты (лобби → выбор стола).
+let STAKE = null; // {stakePerPulka, pulkas, entryCost, online, tableId, mySeatDb}
+// NET — не null, если это онлайн-стол с (потенциально) живыми соперниками.
+// isHost: только хост реально ведёт игровую логику (G) — остальные клиенты
+// зеркалят её через broadcast и лишь отправляют хосту свои ходы.
+let NET = null; // {tableId, mySeatDb, isHost, seatInfo[4], channel, handChannel,
+                //  localOfDb(db), dbOfLocal(local), remoteTimers{}, remoteTimeoutIds{}}
+
+const TURN_TIMER_MS = 10000; // 10 секунд на каждое решение игрока
+let turnTimer = { key:null, deadline:0, intervalId:null, onTimeout:null };
+
 // ---------- Экономика (монеты/скины) — подключена к Supabase ----------
 let PLAYER_COINS = 0;
 let EQUIPPED_SKIN = 'classic';
@@ -435,8 +474,61 @@ let selectedCardKey = null; // tracks the human's tapped-but-not-yet-confirmed c
 function cardKey(c){ return c.joker ? ('J'+c.jid) : (c.suit+c.rank); }
 
 function newPlayer(idx){
-  return {idx, name:NAMES[idx], isHuman: idx===0, hand:[], bid:null, tricks:0,
+  return {idx, name:NAMES[idx], isHuman: idx===0, isRemoteHuman:false, away:false, hand:[], bid:null, tricks:0,
           total:0, missedAny:false, pulkaScores:[], orderRequests:0, orderWins:0};
+}
+
+// ---------- Таймер хода (10 сек на решение) + автопилот ----------
+// Видимый отсчёт для МЕСТА 0 (то, за которым сидит человек перед этим
+// экраном — и на офлайн-игре, и на онлайн-столе, где место 0 это всегда
+// "я" после локальной перенумерации мест, см. NET.localOfDb).
+function clearTurnTimer(){
+  if(turnTimer.intervalId) clearInterval(turnTimer.intervalId);
+  turnTimer.intervalId=null; turnTimer.key=null; turnTimer.onTimeout=null;
+  const el = document.getElementById('turnTimerBadge');
+  if(el) el.classList.add('hidden');
+}
+function armTurnTimer(key, onTimeout){
+  if(turnTimer.key === key) return; // отсчёт на это же решение уже идёт
+  clearTurnTimer();
+  turnTimer.key = key;
+  turnTimer.deadline = Date.now() + TURN_TIMER_MS;
+  turnTimer.onTimeout = onTimeout;
+  const el = document.getElementById('turnTimerBadge');
+  const tick = ()=>{
+    const left = Math.max(0, Math.ceil((turnTimer.deadline - Date.now())/1000));
+    if(el){ el.classList.remove('hidden'); el.textContent = `⏱ ${left} сек. на ход`; }
+    if(left<=0){
+      const cb = turnTimer.onTimeout;
+      clearTurnTimer();
+      if(cb) cb();
+    }
+  };
+  tick();
+  turnTimer.intervalId = setInterval(tick, 250);
+}
+
+// Сторож хода для чужого (не моего) места — актуально только хосту онлайн-
+// стола: если удалённый игрок не прислал решение за 10 сек, хост играет за
+// него сам и помечает место "away", пока тот не вернётся ("Я тут").
+function armDecisionWatch(seat, key, onTimeout){
+  if(seat===0){ armTurnTimer(key, onTimeout); return; }
+  if(!NET || !NET.isHost || !G.players[seat] || G.players[seat].away) return;
+  if(NET.remoteTimers[seat] === key) return;
+  if(NET.remoteTimeoutIds[seat]) clearTimeout(NET.remoteTimeoutIds[seat]);
+  NET.remoteTimers[seat] = key;
+  NET.remoteTimeoutIds[seat] = setTimeout(()=>{
+    NET.remoteTimers[seat] = null;
+    onTimeout();
+  }, TURN_TIMER_MS);
+}
+function clearDecisionWatch(seat){
+  if(seat===0){ clearTurnTimer(); return; }
+  if(NET && NET.remoteTimeoutIds && NET.remoteTimeoutIds[seat]){
+    clearTimeout(NET.remoteTimeoutIds[seat]);
+    NET.remoteTimeoutIds[seat] = null;
+    NET.remoteTimers[seat] = null;
+  }
 }
 
 function initGame(){
@@ -455,9 +547,11 @@ function initGame(){
     trick:[],
     leader:0,
     jokerOrder:null,
+    freeTrick:false,
     history:[],
     logLines:[],
-    lastTrick:null
+    lastTrick:null,
+    phase:'between'
   };
 }
 
@@ -534,9 +628,14 @@ function startRound(){
   G.trumpCard = null;
   G.trick = [];
   G.jokerOrder = null;
+  G.freeTrick = false;
 
   log(`— Раздача ${G.roundIdx+1}/${G.rounds.length} (${r.phase}), по ${r.size} карт. Сдаёт ${NAMES[G.dealer]}.`, true);
 
+  G.phase = 'trump';
+  syncAllHands();
+  render();
+  broadcastStateIfHost();
   if(r.mode==='reveal'){
     const idx = G.leftover.findIndex(c=>!c.joker);
     if(idx>=0){
@@ -547,20 +646,35 @@ function startRound(){
     }
     log(`Козырь открыт из прикупа: ${G.trumpNone ? 'без козыря' : SUIT_NAMES[G.trumpSuit]+' '+G.trumpSuit}.`);
     afterTrumpSet();
+    broadcastStateIfHost();
   } else {
     // The trump is always chosen by whoever sits right after the dealer —
     // this rotates every "choose" round along with the deal, it is never a fixed seat.
     const chooser = (G.dealer+1)%4;
-    if(chooser===0){
+    const autoTrumpFor = (idx)=>{
+      const suit = aiChooseTrump(G.players[idx].hand);
+      if(suit===null){ G.trumpNone=true; log(`${NAMES[idx]} объявляет: без козыря.`); }
+      else { G.trumpSuit=suit; log(`${NAMES[idx]} назначает козырь: ${SUIT_NAMES[suit]} ${suit}.`); }
+      afterTrumpSet();
+      render();
+    };
+    if(chooser===0 && G.players[0].isHuman && !G.players[0].away){
       showTrumpChoiceUI();
+      armDecisionWatch(0, 'trump:'+G.roundIdx, ()=>{
+        G.players[0].away = true;
+        document.getElementById('controls').innerHTML='';
+        autoTrumpFor(0);
+        broadcastStateIfHost();
+      });
+    } else if(G.players[chooser].isRemoteHuman && !G.players[chooser].away){
+      render();
+      armDecisionWatch(chooser, 'trump:'+G.roundIdx, ()=>{
+        G.players[chooser].away = true;
+        autoTrumpFor(chooser);
+        broadcastStateIfHost();
+      });
     } else {
-      setTimeout(()=>{
-        const suit = aiChooseTrump(G.players[chooser].hand);
-        if(suit===null){ G.trumpNone=true; log(`${NAMES[chooser]} объявляет: без козыря.`); }
-        else { G.trumpSuit=suit; log(`${NAMES[chooser]} назначает козырь: ${SUIT_NAMES[suit]} ${suit}.`); }
-        afterTrumpSet();
-        render();
-      }, 700);
+      setTimeout(()=>{ autoTrumpFor(chooser); broadcastStateIfHost(); }, 700);
     }
   }
   render();
@@ -599,11 +713,14 @@ function afterTrumpSet(){
   G.biddingOrder = [1,2,3,4].map(i=>(G.dealer+i)%4);
   G.biddingPos = 0;
   G.bidsSoFar = [];
+  syncAllHands();       // на онлайн-столе: у всех живых игроков руки уже полные — рассылаем
   doBiddingStep();
 }
 
 function doBiddingStep(){
+  G.phase = 'bid';
   render();
+  broadcastStateIfHost();
   if(G.biddingPos >= 4){
     startPlaying();
     return;
@@ -614,18 +731,34 @@ function doBiddingStep(){
   const sumSoFar = G.bidsSoFar.reduce((a,b)=>a+b,0);
   const forbidden = isLast ? (r.size - sumSoFar) : null;
 
-  if(G.players[p].isHuman){
-    showBidUI(p, r.size, forbidden);
-  } else {
-    setTimeout(()=>{
-      let bid = aiEstimateBid(G.players[p].hand);
+  function autoBidFor(p){
+    let bid = aiEstimateBid(G.players[p].hand);
+    bid = Math.max(0, Math.min(r.size, bid));
+    if(forbidden!==null && bid===forbidden){
+      bid = bid>0 ? bid-1 : bid+1;
       bid = Math.max(0, Math.min(r.size, bid));
-      if(forbidden!==null && bid===forbidden){
-        bid = bid>0 ? bid-1 : bid+1;
-        bid = Math.max(0, Math.min(r.size, bid));
-      }
-      commitBid(p, bid);
-    }, 900);
+    }
+    return bid;
+  }
+
+  if(G.players[p].isHuman && !G.players[p].away && p===0){
+    // Локальный игрок (на этом экране) — показываем интерфейс заявки и
+    // запускаем видимый 10-секундный таймер.
+    showBidUI(p, r.size, forbidden);
+    armDecisionWatch(0, 'bid:'+G.roundIdx+':'+G.biddingPos, ()=>{
+      G.players[0].away = true;
+      document.getElementById('controls').innerHTML='';
+      commitBid(0, autoBidFor(0));
+    });
+  } else if(G.players[p].isHuman && !G.players[p].away){
+    // Удалённый живой игрок онлайн-стола — ждём его ход по сети, хост
+    // молча следит за 10-секундным лимитом.
+    armDecisionWatch(p, 'bid:'+G.roundIdx+':'+G.biddingPos, ()=>{
+      G.players[p].away = true;
+      commitBid(p, autoBidFor(p));
+    });
+  } else {
+    setTimeout(()=>{ commitBid(p, autoBidFor(p)); }, 900);
   }
 }
 
@@ -645,24 +778,38 @@ function aiEstimateBid(hand){
 }
 
 function commitBid(p, bid){
+  if(NET && !NET.isHost){
+    clearTurnTimer();
+    sendMove({type:'bid', bid});
+    return;
+  }
   // Guard: ignore a stale bid button click that no longer matches whose turn it is.
   if(G.biddingOrder[G.biddingPos] !== p) return;
+  clearDecisionWatch(p);
   G.players[p].bid = bid;
   G.bidsSoFar.push(bid);
   log(`${NAMES[p]} заявляет: ${bid}.`);
   G.biddingPos++;
   render();
+  broadcastStateIfHost();
   doBiddingStep();
 }
 
 function startPlaying(){
   G.leader = G.biddingOrder[0];
   G.trick = [];
+  G.phase = 'play';
   render();
+  broadcastStateIfHost();
   maybeAiTurn();
 }
 
 function ledSuitOfTrick(){
+  // Свободная взятка: джокер забрал взятку, ходя первым, БЕЗ заказа масти —
+  // в этом случае вся взятка играется без ограничения по масти, даже если
+  // кто-то из последующих игроков положит карту конкретной масти. Обычная
+  // логика ("первая некозырная карта задаёт масть") тут не действует.
+  if(G.freeTrick) return null;
   for(const t of G.trick){ if(!t.card.joker) return t.card.suit; }
   return null;
 }
@@ -706,12 +853,26 @@ function maybeAiTurn(){
   render();
   if(G.trick.length>=4) return;
   const turn = (G.leader + G.trick.length) % 4;
-  if(G.players[turn].isHuman){ return; }
+  if(G.players[turn].isHuman && !G.players[turn].away){
+    // Настоящий человек и не на автопилоте — ждём его клика по карте.
+    if(turn!==0 && NET && NET.isHost){
+      // Удалённый живой игрок — хост молча следит за 10-секундным лимитом
+      // (свой видимый отсчёт для места 0 уже отдельно запускает render()).
+      const key = 'play:'+G.roundIdx+':'+G.players.reduce((a,p)=>a+p.tricks,0)+':'+G.trick.length;
+      armDecisionWatch(turn, key, ()=>{
+        G.players[turn].away = true;
+        maybeAiTurn();
+        broadcastStateIfHost();
+      });
+    }
+    return;
+  }
   setTimeout(()=>{
     // Re-check: if the trick already resolved or the turn moved on while this
     // timer was pending, don't play a now-stale bot move.
     if(G.trick.length>=4) return;
     if((G.leader + G.trick.length) % 4 !== turn) return;
+    if(G.players[turn].isHuman && !G.players[turn].away) return; // вернули управление, пока ждали
     const hand = G.players[turn].hand;
     const ledSuit = ledSuitOfTrick();
     const legal = legalCards(hand, ledSuit);
@@ -765,7 +926,101 @@ function aiChooseCard(pIdx, hand, legal, ledSuit, wasLeading){
   }
 }
 
+// ---------- Онлайн: сериализация состояния между хостом и остальными ----------
+// Хост ведёт единственную "настоящую" игру (G) в своей локальной нумерации мест
+// (у хоста, как и у любого клиента, место 0 в его G — это он сам). Чтобы разные
+// клиенты с разной локальной нумерацией не путались, по сети всё всегда идёт в
+// канонической нумерации мест БД (0..3 — реальные seat из table_players), а
+// каждый клиент переводит канонические номера в свои локальные через
+// NET.localOfDb()/NET.dbOfLocal(). Содержимое чужих рук по сети не уходит —
+// только счётчик карт; свою руку игрок получает отдельным приватным каналом.
+function serializeStateForWire(){
+  const toDb = NET.dbOfLocal;
+  const playersDb = new Array(4);
+  for(let local=0; local<4; local++){
+    const p = G.players[local];
+    playersDb[toDb(local)] = {
+      name:p.name, isHuman:p.isHuman, isRemoteHuman:p.isRemoteHuman, away:p.away,
+      bid:p.bid, tricks:p.tricks, total:p.total, missedAny:p.missedAny,
+      pulkaScores:p.pulkaScores, orderRequests:p.orderRequests, orderWins:p.orderWins,
+      handCount:p.hand.length,
+    };
+  }
+  return {
+    pulkaNum:G.pulkaNum, roundIdx:G.roundIdx, rounds:G.rounds, phase:G.phase,
+    dealer:toDb(G.dealer), leader:toDb(G.leader),
+    trumpSuit:G.trumpSuit, trumpNone:G.trumpNone, trumpCard:G.trumpCard,
+    leftoverCount:(G.leftover||[]).length,
+    biddingOrder:(G.biddingOrder||[]).map(toDb), biddingPos:G.biddingPos, bidsSoFar:G.bidsSoFar||[],
+    trick:(G.trick||[]).map(t=>({playerIdx:toDb(t.playerIdx), card:t.card, action:t.action, order:t.order})),
+    jokerOrder: G.jokerOrder ? {suit:G.jokerOrder.suit, requesterIdx:toDb(G.jokerOrder.requesterIdx)} : null,
+    freeTrick:G.freeTrick,
+    lastTrick: G.lastTrick ? {winner:toDb(G.lastTrick.winner), cards:G.lastTrick.cards.map(c=>({playerIdx:toDb(c.playerIdx), card:c.card}))} : null,
+    players: playersDb,
+    gameOver: G.pulkaNum >= PULKA_LIMIT && G.phase==='between',
+  };
+}
+
+function broadcastStateIfHost(){
+  if(!NET || !NET.isHost || !NET.channel) return;
+  broadcastGameState(NET.channel, serializeStateForWire());
+}
+
+// Отправить хостом каждому живому (не боту) месту актуальную его руку по
+// приватному каналу. Дороговато по сети (пересоздаём канал на отправку), но
+// проще и надёжнее, чем держать 4 постоянно открытых исходящих канала.
+function syncAllHands(){
+  if(!NET || !NET.isHost) return;
+  for(let local=0; local<4; local++){
+    const db = NET.dbOfLocal(local);
+    const info = NET.seatInfo[db];
+    if(info && !info.is_bot && db !== NET.mySeatDb){
+      sendHandTo(NET.tableId, db, G.players[local].hand.map(cardKey));
+    }
+  }
+}
+
+let myHandCache = [];
+let lastShownPhaseKey = null;
+
+// Применить полученное от хоста состояние на НЕ-хосте: переводит канонические
+// номера мест в мои локальные (место 0 = я) и перерисовывает экран.
+function applyWireState(payload){
+  const fromDb = NET.localOfDb;
+  if(!G){ G = {players:[0,1,2,3].map(newPlayer), logLines:[]}; }
+  G.pulkaNum = payload.pulkaNum; G.roundIdx = payload.roundIdx; G.rounds = payload.rounds; G.phase = payload.phase;
+  G.dealer = fromDb(payload.dealer); G.leader = fromDb(payload.leader);
+  G.trumpSuit = payload.trumpSuit; G.trumpNone = payload.trumpNone; G.trumpCard = payload.trumpCard;
+  G.leftover = new Array(payload.leftoverCount||0).fill({back:true});
+  G.biddingOrder = (payload.biddingOrder||[]).map(fromDb);
+  G.biddingPos = payload.biddingPos; G.bidsSoFar = payload.bidsSoFar||[];
+  G.trick = (payload.trick||[]).map(t=>({playerIdx:fromDb(t.playerIdx), card:t.card, action:t.action, order:t.order}));
+  G.jokerOrder = payload.jokerOrder ? {suit:payload.jokerOrder.suit, requesterIdx:fromDb(payload.jokerOrder.requesterIdx)} : null;
+  G.freeTrick = payload.freeTrick;
+  G.lastTrick = payload.lastTrick ? {winner:fromDb(payload.lastTrick.winner), cards:payload.lastTrick.cards.map(c=>({playerIdx:fromDb(c.playerIdx), card:c.card}))} : null;
+  for(let db=0; db<4; db++){
+    const local = fromDb(db);
+    const info = payload.players[db];
+    const keepHand = local===0 ? myHandCache : new Array(info.handCount||0).fill({back:true});
+    const np = newPlayer(local);
+    Object.assign(np, info, {hand: keepHand});
+    G.players[local] = np;
+  }
+  render();
+  if(payload.gameOver){
+    handleOnlineGameOver();
+  }
+}
+
 function playCard(pIdx, card, jokerAction, jokerOrderChoice){
+  // На не-хосте онлайн-стола эта функция никогда не меняет игру напрямую —
+  // она вызывается только из клика по СВОЕЙ (местной 0) карте, поэтому
+  // просто пересылаем ход хосту и ждём следующего state-broadcast.
+  if(NET && !NET.isHost){
+    clearTurnTimer();
+    sendMove({type:'play', card: cardKey(card), action: jokerAction||null, order: jokerOrderChoice||null});
+    return;
+  }
   // Guard: reject any play that doesn't match whose turn it actually is right now.
   // This protects against double-clicks or a bot's delayed move landing after
   // the state has already moved on, which previously could push extra cards
@@ -773,6 +1028,7 @@ function playCard(pIdx, card, jokerAction, jokerOrderChoice){
   if(G.trick.length>=4) return;
   const expectedTurn = (G.leader + G.trick.length) % 4;
   if(pIdx !== expectedTurn) return;
+  clearDecisionWatch(pIdx);
   const hand = G.players[pIdx].hand;
   const wasLeading = G.trick.length===0;
   const i = hand.findIndex(c=> c===card || (c.joker && card.joker && c.jid===card.jid) || (!c.joker && !card.joker && c.suit===card.suit && c.rank===card.rank));
@@ -783,6 +1039,9 @@ function playCard(pIdx, card, jokerAction, jokerOrderChoice){
   if(card.joker && jokerAction==='take' && wasLeading){
     const suit = (jokerOrderChoice && jokerOrderChoice.suit) ? jokerOrderChoice.suit : null;
     G.jokerOrder = {suit, requesterIdx: pIdx};
+    // Без заказа масти — вся взятка свободна: никто не обязан подстраиваться
+    // под масть, которую случайно положит следующий игрок.
+    G.freeTrick = (suit === null);
     G.players[pIdx].orderRequests = (G.players[pIdx].orderRequests||0) + 1;
     const desc = suit ? `заказывает масть ${SUIT_NAMES[suit]} ${suit}` : 'забирает любую карту без заказа';
     log(`${NAMES[pIdx]} ходит джокером и ${desc}!`, true);
@@ -797,10 +1056,49 @@ function playCard(pIdx, card, jokerAction, jokerOrderChoice){
     log(`${NAMES[pIdx]} играет ${cardLabel(card)}.`);
   }
   render();
+  syncAllHands();
+  broadcastStateIfHost();
   if(G.trick.length===4){
     setTimeout(resolveTrick, MOVE_DELAY);
   } else {
     maybeAiTurn();
+  }
+}
+
+// Хост получает это по сети от не-хоста (см. openGameChannel в startOnlineGame)
+// и применяет ход через ОБЫЧНЫЕ игровые функции — они уже сами проверяют,
+// что ход соответствует текущей очереди, так что лишний раз проверять здесь
+// не нужно.
+// Обёртка над sendGameMove, добавляющая номер СВОЕГО db-места — по этому
+// хост поймёт, чей это ход (несколько разных клиентов слушают один и тот
+// же общий канал стола).
+function sendMove(msg){
+  if(!NET || !NET.channel) return;
+  sendGameMove(NET.channel, Object.assign({fromSeat: NET.mySeatDb}, msg));
+}
+
+function hostHandleRemoteMove(fromDbSeat, msg){
+  if(!NET || !NET.isHost) return;
+  const localIdx = NET.localOfDb(fromDbSeat);
+  if(!G || !G.players[localIdx]) return;
+  clearDecisionWatch(localIdx);
+  G.players[localIdx].away = false; // явно пришёл ход — значит, человек на месте
+  if(msg.type==='trump'){
+    if(msg.suit===null){ G.trumpNone=true; log(`${NAMES[localIdx]} объявляет: без козыря.`); }
+    else { G.trumpSuit=msg.suit; log(`${NAMES[localIdx]} назначает козырь: ${SUIT_NAMES[msg.suit]} ${msg.suit}.`); }
+    afterTrumpSet();
+    render();
+    broadcastStateIfHost();
+  } else if(msg.type==='bid'){
+    commitBid(localIdx, msg.bid);
+  } else if(msg.type==='play'){
+    const hand = G.players[localIdx].hand;
+    const card = hand.find(c=>cardKey(c)===msg.card);
+    if(!card) return;
+    playCard(localIdx, card, msg.action||null, msg.order||null);
+  } else if(msg.type==='reclaim'){
+    render();
+    broadcastStateIfHost();
   }
 }
 
@@ -832,6 +1130,7 @@ function resolveTrick(){
   G.lastTrick = {winner, cards: trick.map(t=>({playerIdx:t.playerIdx, card:t.card}))};
   G.trick = [];
   G.jokerOrder = null;
+  G.freeTrick = false;
   render();
   const r = currentRound();
   const totalTricksPlayed = G.players.reduce((a,p)=>a+p.tricks,0);
@@ -885,7 +1184,9 @@ function endPulka(){
   } else {
     const winner = clean[0];
     const myMax = Math.max(...winner.pulkaScores);
-    if(winner.isHuman){
+    if(winner.idx===0){
+      // Показываем выбор премии только локальному игроку (место 0). Для
+      // ботов и удалённых игроков выбор считается автоматически ниже.
       showBonusChoiceUI(winner, myMax);
       return;
     } else {
@@ -918,7 +1219,7 @@ function finishPulkaModal(msg){
   document.getElementById('modalOverlay').classList.remove('hidden');
   document.getElementById('nextPulkaBtn').onclick = ()=>{
     document.getElementById('modalOverlay').classList.add('hidden');
-    if(gameOver){ showSetupModal(); } else { startNewPulka(); }
+    if(gameOver){ settleAndReturnToLobby(); } else { startNewPulka(); broadcastStateIfHost(); }
   };
   render();
 }
@@ -1195,6 +1496,39 @@ function render(){
     hr.appendChild(el);
   }
   layoutHandFan(hr);
+
+  // Автопилот-баннер и таймер хода/решения.
+  const awayBanner = document.getElementById('awayBanner');
+  awayBanner.classList.toggle('hidden', !G.players[0].away);
+
+  if(isMyTurn && !G.players[0].away){
+    const turnKey = 'play:'+G.roundIdx+':'+G.players.reduce((a,p)=>a+p.tricks,0)+':'+G.trick.length;
+    armTurnTimer(turnKey, ()=>{
+      G.players[0].away = true;
+      hideTableDialog();
+      selectedCardKey = null;
+      autoPlayForMe();
+    });
+  } else if(turnTimer.key && turnTimer.key.startsWith('play:')){
+    clearTurnTimer();
+  }
+}
+
+// Разыгрывает карту за местного игрока (место 0), когда истекли 10 секунд
+// на ход. Используется и локальным таймером, и как безопасный запасной
+// вариант, если истёк отсчёт прямо во время диалога по джокеру.
+function autoPlayForMe(){
+  if(!isMyTurnNow()) return;
+  const hand = G.players[0].hand;
+  const ledSuit = ledSuitOfTrick();
+  const legal = legalCards(hand, ledSuit);
+  if(legal.length===0) return;
+  const wasLeading = G.trick.length===0;
+  const choice = aiChooseCard(0, hand, legal, ledSuit, wasLeading);
+  playCard(0, choice.card, choice.action, choice.order);
+}
+function isMyTurnNow(){
+  return G && G.trick.length<4 && ((G.leader + G.trick.length)%4===0) && G.players[0].hand.length>0 && G.players[0].bid!==null;
 }
 
 // Lays the player's cards out in a single horizontal row, never wrapping.
@@ -1312,13 +1646,21 @@ function showTrumpChoiceUI(){
     const btn = document.createElement('button');
     btn.className='bid-btn';
     btn.textContent = s;
-    btn.onclick = ()=>{ G.trumpSuit=s; log(`Вы назначаете козырь: ${SUIT_NAMES[s]} ${s}.`); c.innerHTML=''; afterTrumpSet(); render(); };
+    btn.onclick = ()=>{
+      clearTurnTimer();
+      if(NET && !NET.isHost){ sendMove({type:'trump', suit:s}); c.innerHTML=''; return; }
+      G.trumpSuit=s; log(`Вы назначаете козырь: ${SUIT_NAMES[s]} ${s}.`); c.innerHTML=''; afterTrumpSet(); render(); broadcastStateIfHost();
+    };
     grid.appendChild(btn);
   }
   const noneBtn = document.createElement('button');
   noneBtn.className='bid-btn';
   noneBtn.textContent='без козыря';
-  noneBtn.onclick = ()=>{ G.trumpNone=true; log('Вы объявляете: без козыря.'); c.innerHTML=''; afterTrumpSet(); render(); };
+  noneBtn.onclick = ()=>{
+    clearTurnTimer();
+    if(NET && !NET.isHost){ sendMove({type:'trump', suit:null}); c.innerHTML=''; return; }
+    G.trumpNone=true; log('Вы объявляете: без козыря.'); c.innerHTML=''; afterTrumpSet(); render(); broadcastStateIfHost();
+  };
   grid.appendChild(noneBtn);
 }
 
@@ -1464,10 +1806,24 @@ function showLastTrickDialog(){
 }
 
 document.getElementById('restartBtn').onclick = ()=>{
-  if(confirm('Начать игру заново? Текущий прогресс будет потерян.')){
+  const warn = STAKE ? ' Ставка на этом столе не возвращается.' : '';
+  if(confirm('Начать игру заново? Текущий прогресс будет потерян.'+warn)){
+    leaveOnlineTableIfAny();
     document.getElementById('modalOverlay').classList.add('hidden');
-    showSetupModal();
+    showLobby();
   }
+};
+document.getElementById('imHereBtn').onclick = ()=>{
+  G.players[0].away = false;
+  if(NET && !NET.isHost){
+    sendMove({type:'reclaim'});
+    render();
+    return;
+  }
+  render();
+  if(G.phase==='play') maybeAiTurn();
+  else if(G.phase==='bid') doBiddingStep();
+  broadcastStateIfHost();
 };
 document.getElementById('fullscreenBtn').onclick = ()=>{
   if(!document.fullscreenElement){
@@ -1485,6 +1841,292 @@ document.querySelector('.table-felt').addEventListener('click', ()=>{
     render();
   }
 });
+
+// ============================================================
+// Лобби, ставки и онлайн-подбор стола
+// ============================================================
+
+function leaveOnlineTableIfAny(){
+  if(NET){
+    try{ NET.channel && NET.channel.unsubscribe(); }catch(e){}
+    if(NET.remoteTimeoutIds){ Object.values(NET.remoteTimeoutIds).forEach(id=>{ if(id) clearTimeout(id); }); }
+  }
+  clearTurnTimer();
+}
+
+async function settleAndReturnToLobby(){
+  if(STAKE && STAKE.online && NET && NET.isHost){
+    try{
+      const totals = {};
+      for(let local=0; local<4; local++){
+        const db = NET.dbOfLocal(local);
+        const info = NET.seatInfo[db];
+        if(info && !info.is_bot){ totals[info.yandex_id] = G.players[local].total; }
+      }
+      await settleStakeSession(NET.tableId, totals);
+    }catch(e){ console.error('Не удалось рассчитать банк стола:', e); }
+  } else if(STAKE && !STAKE.online){
+    // Офлайн-тест (без Supabase/Яндекс ID) — считаем банк локально по той же
+    // формуле, что и fn_settle_stake_table на сервере: 1-е место 2×, 2-е 1.5×,
+    // 3-е 0.5×, 4-е ничего, от суммы входа.
+    const ranked = G.players.map(p=>p.total).slice().sort((a,b)=>b-a);
+    const myTotal = G.players[0].total;
+    const rank = ranked.indexOf(myTotal);
+    const mult = [2, 1.5, 0.5, 0][rank] ?? 0;
+    const payout = Math.floor(STAKE.entryCost * mult);
+    if(payout>0) PLAYER_COINS += payout;
+  }
+  leaveOnlineTableIfAny();
+  STAKE = null; NET = null;
+  showLobby();
+}
+
+let gameOverShownOnce = false;
+function handleOnlineGameOver(){
+  if(gameOverShownOnce) return;
+  gameOverShownOnce = true;
+  const box = document.getElementById('modalBox');
+  box.innerHTML = `<h2>Игра окончена</h2>
+    <table class="score-table"><tr><th>Игрок</th><th>Всего очков</th></tr>
+    ${G.players.map(p=>`<tr><td>${p.name}</td><td>${p.total}</td></tr>`).join('')}
+    </table>
+    <p style="font-size:0.85rem; color:rgba(242,234,217,0.7);">Расчёт банка проводит хост стола — баланс обновится автоматически.</p>
+    <div class="controls"><button class="btn" id="backToLobbyBtn2">В лобби</button></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  document.getElementById('backToLobbyBtn2').onclick = async ()=>{
+    document.getElementById('modalOverlay').classList.add('hidden');
+    leaveOnlineTableIfAny();
+    STAKE=null; NET=null;
+    if(YANDEX_ID){ try{ const profile = await ensureProfile(YANDEX_ID, getPlayerName()); PLAYER_COINS = Number(profile.coins)||0; }catch(e){} }
+    showLobby();
+  };
+}
+
+function showLobby(){
+  leaveOnlineTableIfAny();
+  const box = document.getElementById('modalBox');
+  const balanceStr = YANDEX_ID ? `${PLAYER_COINS} монет` : 'офлайн-режим (баланс не сохраняется)';
+  box.innerHTML = `<h2>Джокер — выберите стол</h2>
+    <p style="margin-bottom:10px;">Баланс: <b style="color:var(--gold)">${balanceStr}</b></p>
+    <div class="controls" style="flex-direction:column; align-items:stretch; margin-top:0;">
+      <button class="btn secondary" id="freeGameBtn">Бесплатная игра с ботами (офлайн, без ставки)</button>
+    </div>
+    <p style="margin:14px 0 8px; font-size:0.85rem; color:rgba(242,234,217,0.7);">Столы на монеты — вход списывается сразу за всю сессию, победитель забирает банк:</p>
+    <div class="stake-grid" id="stakeGrid"></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  document.getElementById('freeGameBtn').onclick = ()=>{
+    STAKE = null;
+    document.getElementById('modalOverlay').classList.add('hidden');
+    showSetupModal();
+  };
+  const grid = document.getElementById('stakeGrid');
+  STAKE_TIERS.forEach((stake, i)=>{
+    const entry4 = stake*4;
+    const afford = !YANDEX_ID || PLAYER_COINS >= entry4;
+    const btn = document.createElement('button');
+    btn.className='btn stake-tile' + (afford?'':' secondary');
+    if(YANDEX_ID && !afford) btn.disabled = true;
+    btn.innerHTML = `<div class="t-num">Стол ${i+1}</div><div class="t-cost">${stake} монет/пулька</div>`;
+    btn.onclick = ()=>{ document.getElementById('modalOverlay').classList.add('hidden'); showStakeFormatModal(stake); };
+    grid.appendChild(btn);
+  });
+}
+
+function showStakeFormatModal(stake){
+  const box = document.getElementById('modalBox');
+  const longCost = stake*4, shortCost = stake*1;
+  const canLong = !YANDEX_ID || PLAYER_COINS>=longCost;
+  const canShort = !YANDEX_ID || PLAYER_COINS>=shortCost;
+  box.innerHTML = `<h2>Стол — ${stake} монет за пульку</h2>
+    <p>Баланс: <b style="color:var(--gold)">${YANDEX_ID ? PLAYER_COINS+' монет' : 'офлайн'}</b></p>
+    <div class="controls" id="stakeFormatOpts" style="flex-direction:column; align-items:stretch;"></div>
+    <div class="controls"><button class="btn secondary" id="backToLobbyBtn">Назад к столам</button></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  const opts = document.getElementById('stakeFormatOpts');
+
+  const longBtn = document.createElement('button');
+  longBtn.className='btn'+(canLong?'':' secondary'); longBtn.disabled=!canLong;
+  longBtn.textContent = `Длинные девятки — 4 пульки (вход ${longCost} монет)`;
+  longBtn.onclick = ()=>{ document.getElementById('modalOverlay').classList.add('hidden'); beginStakeFlow(stake, 4, longCost); };
+  opts.appendChild(longBtn);
+
+  const shortBtn = document.createElement('button');
+  shortBtn.className='btn'+(canShort?'':' secondary'); shortBtn.disabled=!canShort;
+  shortBtn.textContent = `Короткие девятки — 1 пулька (вход ${shortCost} монет)`;
+  shortBtn.onclick = ()=>{ document.getElementById('modalOverlay').classList.add('hidden'); beginStakeFlow(stake, 1, shortCost); };
+  opts.appendChild(shortBtn);
+
+  document.getElementById('backToLobbyBtn').onclick = ()=>{ document.getElementById('modalOverlay').classList.add('hidden'); showLobby(); };
+}
+
+async function beginStakeFlow(stake, pulkas, cost){
+  if(!YANDEX_ID){
+    // Офлайн-тест без Supabase: списываем локально (без сохранения) и
+    // сразу играем с ботами — так можно проверить экономику и таймер хода
+    // без реального онлайн-стола.
+    PLAYER_COINS -= cost;
+    STAKE = {stakePerPulka:stake, pulkas, entryCost:cost, online:false, tableId:null};
+    GAME_MODE = pulkas>1 ? 'nines' : 'nines_short';
+    PULKA_LIMIT = pulkas;
+    startGame();
+    return;
+  }
+  const box = document.getElementById('modalBox');
+  box.innerHTML = `<h2>Подключение к столу…</h2><p>Секунду.</p>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+  try{
+    const table = await findOrCreateTable(YANDEX_ID, stake, pulkas);
+    const ok = await chargeStakeEntry(YANDEX_ID, table.tableId);
+    if(!ok){
+      await leaveTable(table.tableId, table.mySeat).catch(()=>{});
+      alert('Не хватает монет на этот стол.');
+      showLobby();
+      return;
+    }
+    PLAYER_COINS -= cost;
+    STAKE = {stakePerPulka:stake, pulkas, entryCost:cost, online:true, tableId:table.tableId, mySeatDb:table.mySeat};
+    showSearchingModal(table.tableId, table.mySeat, stake, pulkas, cost);
+  } catch(e){
+    console.error('Онлайн-стол недоступен, играем с ботами локально:', e);
+    PLAYER_COINS -= cost;
+    STAKE = {stakePerPulka:stake, pulkas, entryCost:cost, online:false, tableId:null};
+    GAME_MODE = pulkas>1 ? 'nines' : 'nines_short';
+    PULKA_LIMIT = pulkas;
+    startGame();
+  }
+}
+
+// Минимум 2 живых игрока должны сесть за стол за 60 секунд поиска — иначе
+// стол отменяется и ставка возвращается. Если наберётся 2, 3 или 4 живых
+// игрока, оставшиеся места (если есть) тут же занимают боты, и игра
+// начинается без дальнейшего ожидания.
+function showSearchingModal(tableId, mySeat, stake, pulkas, cost){
+  const box = document.getElementById('modalBox');
+  box.innerHTML = `<h2>Идёт поиск игроков…</h2>
+    <p>Стол на ${stake} монет/пулька, ${pulkas>1?pulkas+' пульки':'1 пулька'}. Живых игроков за столом: <b id="seatsFilled">1</b>/4.</p>
+    <p style="font-size:0.85rem; color:rgba(242,234,217,0.7);">Нужно минимум 2 живых игрока. Не наберётся за минуту — ставка вернётся автоматически. Если наберётся — оставшиеся места тут же займут боты.</p>
+    <p>⏳ Осталось: <b id="searchCountdown">60</b> сек</p>
+    <div class="controls"><button class="btn secondary" id="cancelSearchBtn">Отменить и вернуть монеты</button></div>`;
+  document.getElementById('modalOverlay').classList.remove('hidden');
+
+  let secondsLeft = 60;
+  let finished = false;
+  const countdownEl = document.getElementById('searchCountdown');
+  const filledEl = document.getElementById('seatsFilled');
+
+  const sub = subscribeToTable(tableId, async ()=>{
+    if(finished) return;
+    const players = await listTablePlayers(tableId);
+    filledEl.textContent = String(players.length);
+    if(players.length>=2 && !finished){ finish(players); }
+  });
+
+  const interval = setInterval(async ()=>{
+    secondsLeft--;
+    countdownEl.textContent = String(Math.max(0,secondsLeft));
+    if(secondsLeft<=0 && !finished){
+      const players = await listTablePlayers(tableId);
+      if(players.length>=2){ finish(players); }
+      else { cancelAndRefund('Не набралось достаточно живых игроков за минуту.'); }
+    }
+  }, 1000);
+
+  async function finish(players){
+    if(finished) return;
+    finished = true;
+    clearInterval(interval);
+    try{ sub && sub.unsubscribe && sub.unsubscribe(); }catch(e){}
+    document.getElementById('modalOverlay').classList.add('hidden');
+    const finalPlayers = await fillRemainingSeatsWithBots(tableId, players);
+    startOnlineGame(tableId, mySeat, finalPlayers);
+  }
+
+  async function cancelAndRefund(reason){
+    if(finished) return;
+    finished = true;
+    clearInterval(interval);
+    try{ sub && sub.unsubscribe && sub.unsubscribe(); }catch(e){}
+    await leaveTable(tableId, mySeat).catch(()=>{});
+    try{
+      await addCoins(YANDEX_ID, cost, 'stake_refund', {table_id: tableId, reason});
+      PLAYER_COINS += cost;
+    }catch(e){ console.error('Не удалось вернуть монеты автоматически:', e); }
+    STAKE = null;
+    alert(reason+' Монеты возвращены.');
+    showLobby();
+  }
+
+  document.getElementById('cancelSearchBtn').onclick = ()=>{ cancelAndRefund('Поиск отменён.'); };
+}
+
+// Стол собран (2-4 живых игрока + возможно боты на оставшихся местах) —
+// поднимаем реальную игру. Хост — тот из живых игроков, кто сидит на
+// наименьшем по номеру месте; он один ведёт настоящую игровую логику (G),
+// остальные клиенты получают трансляцию состояния и лишь отправляют хосту
+// свои решения (см. serializeStateForWire/applyWireState/hostHandleRemoteMove).
+function startOnlineGame(tableId, mySeatDb, players){
+  gameOverShownOnce = false;
+  const bySeat = new Array(4).fill(null);
+  players.forEach(p=>{ bySeat[p.seat] = p; });
+  const hostSeatDb = bySeat.findIndex(p=>p && !p.is_bot);
+  const isHost = hostSeatDb === mySeatDb;
+
+  NET = {
+    tableId, mySeatDb, isHost, seatInfo: bySeat,
+    remoteTimers:{}, remoteTimeoutIds:{},
+    localOfDb: (db)=> (db - mySeatDb + 4) % 4,
+    dbOfLocal: (local)=> (mySeatDb + local) % 4,
+    channel: null,
+  };
+
+  GAME_MODE = STAKE.pulkas>1 ? 'nines' : 'nines_short';
+  PULKA_LIMIT = STAKE.pulkas;
+
+  NET.channel = openGameChannel(tableId, {
+    onMove: (msg)=>{
+      if(!NET.isHost) return;
+      // msg приходит от чужого броадкаста — нам нужно понять, из какого
+      // db-места он пришёл. Проще всего свой собственный ход не отправлять
+      // (self:false в конфиге канала уже это гарантирует), а место
+      // определяем по included seat в самом сообщении.
+      if(typeof msg.fromSeat === 'number') hostHandleRemoteMove(msg.fromSeat, msg);
+    },
+    onState: (payload)=>{ if(!NET.isHost) applyWireState(payload); },
+  });
+
+  if(NET.isHost){
+    document.getElementById('modalOverlay').classList.add('hidden');
+    initGame();
+    for(let local=0; local<4; local++){
+      const db = NET.dbOfLocal(local);
+      const info = bySeat[db];
+      G.players[local].isHuman = (local===0) || (!!info && !info.is_bot);
+      G.players[local].isRemoteHuman = !!info && !info.is_bot && local!==0;
+      G.players[local].away = false;
+      G.players[local].name = info && !info.is_bot ? (local===0?'Вы':`Игрок ${db+1}`) : NAMES[local];
+    }
+    doAceDraw(()=>{ startRound(); syncAllHands(); broadcastStateIfHost(); });
+  } else {
+    G = {players:[0,1,2,3].map(newPlayer), logLines:[], phase:'between'};
+    NET.handChannel = openHandChannel(tableId, mySeatDb, (payload)=>{
+      myHandCache = sortHand((payload.cards||[]).map(k=>decodeCardKey(k)));
+      if(G) { G.players[0].hand = myHandCache; render(); }
+    });
+    const box = document.getElementById('modalBox');
+    box.innerHTML = `<h2>Ждём хост стола…</h2><p>Сейчас начнётся раздача.</p>`;
+    document.getElementById('modalOverlay').classList.remove('hidden');
+  }
+}
+
+// Восстанавливает объект карты по её короткому ключу (см. cardKey) — нужно
+// только для приёма своей руки по сети (jid/rank достаточно для отрисовки
+// и для сверки при отправке хода назад хосту через тот же ключ).
+function decodeCardKey(k){
+  if(k[0]==='J' && (k==='J1' || k==='J2')) return {joker:true, jid:Number(k.slice(1)), rank:k};
+  const suit = k[0];
+  const rank = k.slice(1);
+  return {suit, rank, value: RANKS.indexOf(rank), joker:false};
+}
 
 function showSetupModal(){
   const box = document.getElementById('modalBox');
@@ -1531,8 +2173,8 @@ document.getElementById('inventoryBtn').onclick = showInventoryModal;
 document.getElementById('shopBtn').onclick = showShopModal;
 
 initEconomy().then(()=>{
-  showSetupModal();
-  markGameReady(); // сообщаем Яндекс Играм, что экран выбора формата уже показан
+  showLobby();
+  markGameReady(); // сообщаем Яндекс Играм, что стартовый экран уже показан
 });
 </script>
 </body>

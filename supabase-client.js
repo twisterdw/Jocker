@@ -94,6 +94,118 @@ export function subscribeToTable(tableId, onChange) {
     .subscribe();
 }
 
+// ---------- Матчмейкинг (лобби столов) ----------
+
+// Найти стол в статусе "waiting" на нужную ставку/формат и подсесть на
+// свободное место, либо создать новый стол и сесть первым (место 0).
+// Гонки (два клиента целятся в одно и то же место) отбиваются самой БД —
+// (table_id, seat) уникален, вставка второго просто упадёт, и код пробует
+// следующее место/стол.
+export async function findOrCreateTable(yandexId, stakePerPulka, pulkasTotal) {
+  const { data: waiting } = await supabase
+    .from('game_tables')
+    .select('id')
+    .eq('status', 'waiting')
+    .eq('stake_per_pulka', stakePerPulka)
+    .eq('pulkas_total', pulkasTotal)
+    .order('created_at', { ascending: true })
+    .limit(10);
+
+  for (const t of (waiting || [])) {
+    const { data: existing } = await supabase.from('table_players').select('seat').eq('table_id', t.id);
+    const taken = new Set((existing || []).map(r => r.seat));
+    for (let seat = 0; seat < 4; seat++) {
+      if (taken.has(seat)) continue;
+      const { error } = await supabase.from('table_players').insert({ table_id: t.id, seat, yandex_id: yandexId });
+      if (!error) return { tableId: t.id, mySeat: seat };
+      // конфликт мест — пробуем следующее свободное место/стол
+    }
+  }
+
+  const { data: created, error: createErr } = await supabase
+    .from('game_tables')
+    .insert({ status: 'waiting', stake_per_pulka: stakePerPulka, pulkas_total: pulkasTotal, mode: 'nines_short' })
+    .select().single();
+  if (createErr) throw createErr;
+
+  const { error: joinErr } = await supabase.from('table_players').insert({ table_id: created.id, seat: 0, yandex_id: yandexId });
+  if (joinErr) throw joinErr;
+  return { tableId: created.id, mySeat: 0 };
+}
+
+export async function listTablePlayers(tableId) {
+  const { data, error } = await supabase.from('table_players').select('seat, yandex_id, is_bot').eq('table_id', tableId).order('seat');
+  if (error) throw error;
+  return data;
+}
+
+// Занять ботами все места, не занятые живыми игроками за минуту поиска,
+// и перевести стол в статус "playing". bot_1/bot_2/bot_3 — общие
+// служебные профили (см. supabase_schema.sql), их можно использовать
+// одновременно на разных столах — это просто ярлык, а не аккаунт.
+export async function fillRemainingSeatsWithBots(tableId, existingPlayers) {
+  const taken = new Set(existingPlayers.map(p => p.seat));
+  const botIds = ['bot_1', 'bot_2', 'bot_3'];
+  let botI = 0;
+  const inserts = [];
+  for (let seat = 0; seat < 4; seat++) {
+    if (taken.has(seat)) continue;
+    inserts.push({ table_id: tableId, seat, yandex_id: botIds[botI % botIds.length], is_bot: true });
+    botI++;
+  }
+  if (inserts.length > 0) {
+    const { error } = await supabase.from('table_players').insert(inserts);
+    if (error) throw error;
+  }
+  await supabase.from('game_tables').update({ status: 'playing' }).eq('id', tableId);
+  return listTablePlayers(tableId);
+}
+
+// Покинуть стол до начала игры (отмена поиска) — просто убирает место.
+export async function leaveTable(tableId, seat) {
+  await supabase.from('table_players').delete().eq('table_id', tableId).eq('seat', seat);
+}
+
+// ---------- Realtime-канал самой игры (broadcast, без сохранения на сервере) ----------
+// Общий канал стола: публичное состояние (чей ход, что на столе, счёт,
+// количество карт у каждого — БЕЗ содержимого чужих рук) + ходы от
+// не-хоста к хосту. Хост — тот из живых игроков, кто сидит на меньшем
+// по номеру месте.
+export function openGameChannel(tableId, { onState, onMove } = {}) {
+  const ch = supabase.channel(`game:${tableId}`, { config: { broadcast: { self: false } } });
+  if (onState) ch.on('broadcast', { event: 'state' }, (msg) => onState(msg.payload));
+  if (onMove) ch.on('broadcast', { event: 'move' }, (msg) => onMove(msg.payload));
+  ch.subscribe();
+  return ch;
+}
+
+export function broadcastGameState(channel, statePayload) {
+  channel.send({ type: 'broadcast', event: 'state', payload: statePayload });
+}
+
+export function sendGameMove(channel, movePayload) {
+  channel.send({ type: 'broadcast', event: 'move', payload: movePayload });
+}
+
+// Приватный канал руки — подписывается только сам игрок этого места, чтобы
+// содержимое его карт не уходило остальным подписчикам общего канала.
+export function openHandChannel(tableId, seat, onHand) {
+  const ch = supabase.channel(`game:${tableId}:hand:${seat}`, { config: { broadcast: { self: false } } });
+  ch.on('broadcast', { event: 'hand' }, (msg) => onHand(msg.payload));
+  ch.subscribe();
+  return ch;
+}
+
+export function sendHandTo(tableId, seat, cardKeys) {
+  const ch = supabase.channel(`game:${tableId}:hand:${seat}`, { config: { broadcast: { self: false } } });
+  ch.subscribe((status) => {
+    if (status === 'SUBSCRIBED') {
+      ch.send({ type: 'broadcast', event: 'hand', payload: { cards: cardKeys } });
+      setTimeout(() => ch.unsubscribe(), 300);
+    }
+  });
+}
+
 // Вызвать один раз на игрока при посадке за стол на ставках — списывает
 // stake_per_pulka × 4 сразу. Возвращает false, если монет не хватает.
 export async function chargeStakeEntry(yandexId, tableId) {
