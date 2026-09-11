@@ -32,9 +32,16 @@ create table if not exists user_skins (
   primary key (yandex_id, skin_id)
 );
 
-alter table profiles
-  add constraint fk_equipped_skin
-  foreign key (equipped_skin_id) references skins(id);
+do $$
+begin
+  if not exists (
+    select 1 from pg_constraint where conname = 'fk_equipped_skin'
+  ) then
+    alter table profiles
+      add constraint fk_equipped_skin
+      foreign key (equipped_skin_id) references skins(id);
+  end if;
+end $$;
 
 -- ---------- Денежный журнал (для аудита — откуда взялись/куда делись монеты) ----------
 create table if not exists coin_transactions (
@@ -122,14 +129,23 @@ alter table table_players enable row level security;
 alter table game_history enable row level security;
 
 -- Публичное чтение (лидерборды, магазин, столы) разрешено всем.
+drop policy if exists "public read profiles" on profiles;
 create policy "public read profiles" on profiles for select using (true);
+drop policy if exists "public read skins" on skins;
 create policy "public read skins" on skins for select using (true);
+drop policy if exists "public read user_skins" on user_skins;
 create policy "public read user_skins" on user_skins for select using (true);
+drop policy if exists "public read seasons" on seasons;
 create policy "public read seasons" on seasons for select using (true);
+drop policy if exists "public read season_scores" on season_scores;
 create policy "public read season_scores" on season_scores for select using (true);
+drop policy if exists "public read jackpot" on jackpot_pool;
 create policy "public read jackpot" on jackpot_pool for select using (true);
+drop policy if exists "public read tables" on game_tables;
 create policy "public read tables" on game_tables for select using (true);
+drop policy if exists "public read table_players" on table_players;
 create policy "public read table_players" on table_players for select using (true);
+drop policy if exists "public read history" on game_history;
 create policy "public read history" on game_history for select using (true);
 
 -- Прямая запись клиентом ЗАПРЕЩЕНА — никаких insert/update policy для
@@ -140,10 +156,15 @@ create policy "public read history" on game_history for select using (true);
 -- (кто где сидит), а не деньги, поэтому для них разрешена прямая запись
 -- клиентом (нужна для матчмейкинга без отдельного сервера). Монеты всё
 -- равно двигаются только через fn_charge_stake_entry / fn_settle_stake_table.
+drop policy if exists "public insert tables" on game_tables;
 create policy "public insert tables" on game_tables for insert with check (true);
+drop policy if exists "public update tables" on game_tables;
 create policy "public update tables" on game_tables for update using (true);
+drop policy if exists "public insert table_players" on table_players;
 create policy "public insert table_players" on table_players for insert with check (true);
+drop policy if exists "public update table_players" on table_players;
 create policy "public update table_players" on table_players for update using (true);
+drop policy if exists "public delete table_players" on table_players;
 create policy "public delete table_players" on table_players for delete using (true);
 
 -- ============================================================
@@ -259,7 +280,47 @@ begin
   return true;
 end; $$;
 
--- ---------- Стартовые данные ----------
+-- Отменить стол и вернуть ставку ВСЕМ реальным (не боты) игрокам, кто уже
+-- сидел за ним. Вызывается автором стола, если за 60 сек поиска не
+-- набралось минимум 2 живых игрока (или явной отмены). Всё в одной
+-- транзакции — безопасно даже если кто-то из игроков одновременно
+-- пытается что-то ещё сделать за этим столом.
+create or replace function fn_cancel_table_and_refund(p_table_id uuid)
+returns void
+language plpgsql security definer as $$
+declare v_stake integer; v_pulkas int; v_entry bigint; r record;
+begin
+  select stake_per_pulka, pulkas_total into v_stake, v_pulkas from game_tables where id = p_table_id;
+  if v_stake is null then return; end if;
+  v_entry := v_stake * v_pulkas;
+
+  for r in select yandex_id from table_players where table_id = p_table_id and is_bot = false loop
+    perform fn_add_coins(r.yandex_id, v_entry, 'stake_refund', jsonb_build_object('table_id', p_table_id));
+  end loop;
+
+  delete from table_players where table_id = p_table_id;
+  update game_tables set status = 'cancelled' where id = p_table_id;
+end; $$;
+
+-- Включаем realtime-репликацию на столах/местах, чтобы счётчик "N/4" в
+-- лобби обновлялся мгновенно у всех подключённых клиентов (без этого
+-- postgres_changes-подписка молча ничего не присылает, и счётчик виснет).
+-- Безопасно перезапускать: пропускаем таблицы, которые уже добавлены.
+do $$
+begin
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'game_tables'
+  ) then
+    alter publication supabase_realtime add table game_tables;
+  end if;
+  if not exists (
+    select 1 from pg_publication_tables
+    where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'table_players'
+  ) then
+    alter publication supabase_realtime add table table_players;
+  end if;
+end $$;
 insert into skins (id, name, description, price_coins, is_default) values
   ('classic', 'Классическая колода', 'Стандартный вид карт', 0, true)
 on conflict (id) do nothing;

@@ -117,7 +117,7 @@ export async function findOrCreateTable(yandexId, stakePerPulka, pulkasTotal) {
     for (let seat = 0; seat < 4; seat++) {
       if (taken.has(seat)) continue;
       const { error } = await supabase.from('table_players').insert({ table_id: t.id, seat, yandex_id: yandexId });
-      if (!error) return { tableId: t.id, mySeat: seat };
+      if (!error) return { tableId: t.id, mySeat: seat, isCreator: false };
       // конфликт мест — пробуем следующее свободное место/стол
     }
   }
@@ -130,7 +130,25 @@ export async function findOrCreateTable(yandexId, stakePerPulka, pulkasTotal) {
 
   const { error: joinErr } = await supabase.from('table_players').insert({ table_id: created.id, seat: 0, yandex_id: yandexId });
   if (joinErr) throw joinErr;
-  return { tableId: created.id, mySeat: 0 };
+  return { tableId: created.id, mySeat: 0, isCreator: true };
+}
+
+// Текущий статус стола ('waiting' | 'playing' | 'cancelled' | 'finished') —
+// используется НЕ-автором стола, чтобы понять, что автор уже закончил поиск
+// (пока автор считает 60 секунд, остальные просто опрашивают этот статус).
+export async function getTableStatus(tableId) {
+  const { data, error } = await supabase.from('game_tables').select('status').eq('id', tableId).single();
+  if (error) return null;
+  return data ? data.status : null;
+}
+
+// Отменить стол и вернуть монеты ВСЕМ реальным (не боты) игрокам, кто уже
+// сидел за ним — вызывает только автор стола, если за 60 сек не набралось
+// минимум 2 живых игрока. Считает и списывает/возвращает атомарно на
+// сервере (fn_cancel_table_and_refund), поэтому безопасно при гонках.
+export async function cancelTableAndRefund(tableId) {
+  const { error } = await supabase.rpc('fn_cancel_table_and_refund', { p_table_id: tableId });
+  if (error) throw error;
 }
 
 export async function listTablePlayers(tableId) {
