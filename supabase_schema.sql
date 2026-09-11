@@ -424,9 +424,12 @@ begin
   end loop;
 
   -- Подходящего стола со свободным местом нет — создаём новый и садимся первым.
-  insert into game_tables (status, stake_per_pulka, pulkas_total, mode, search_deadline)
+  -- Алиас "gt" в RETURNING обязателен: без него "search_deadline" неоднозначен
+  -- между колонкой таблицы game_tables и выходным параметром этой функции
+  -- (returns table(... search_deadline ...) создаёт одноимённую переменную).
+  insert into game_tables as gt (status, stake_per_pulka, pulkas_total, mode, search_deadline)
     values ('waiting', p_stake, p_pulkas, 'nines_short', now() + interval '60 seconds')
-    returning id, search_deadline into v_table;
+    returning gt.id, gt.search_deadline into v_table;
   insert into table_players (table_id, seat, yandex_id, last_seen_at)
     values (v_table.id, 0, p_yandex_id, now());
   return query select v_table.id, 0, true, v_table.search_deadline;

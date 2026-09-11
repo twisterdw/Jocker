@@ -430,7 +430,17 @@ let STAKE = null; // {stakePerPulka, pulkas, entryCost, online, tableId, mySeatD
 let NET = null; // {tableId, mySeatDb, isHost, seatInfo[4], channel, handChannel,
                 //  localOfDb(db), dbOfLocal(local), remoteTimers{}, remoteTimeoutIds{}}
 
-const TURN_TIMER_MS = 10000; // 10 секунд на каждое решение игрока
+// На не-хосте, пока не пришла первая трансляция состояния от хоста, экран
+// показывает заглушку "Ждём хост стола…". РАНЬШЕ она никогда не скрывалась:
+// applyWireState просто перерисовывал стол ПОД ней, и второй (и последующие)
+// игроки навсегда оставались смотреть на эту заглушку, хотя игра за ней уже
+// шла — выглядело так, будто "автор начинает играть, а второй игрок нет".
+// Этот флаг отмечает, что заглушка сейчас на экране, чтобы applyWireState
+// знал, что её нужно убрать, как только придут реальные данные стола.
+let guestWaitingForHostModalOpen = false;
+
+const TURN_TIMER_MS = 10000; // 10 секунд на ход картой (розыгрыш взятки)
+const TRUMP_BID_TIMER_MS = 30000; // 30 секунд на выбор козыря и на заявку карт — но не на сам ход
 let turnTimer = { key:null, deadline:0, intervalId:null, onTimeout:null };
 
 // ---------- Экономика (монеты/скины) — подключена к Supabase ----------
@@ -474,6 +484,17 @@ async function initEconomy(){
 let selectedCardKey = null; // tracks the human's tapped-but-not-yet-confirmed card
 function cardKey(c){ return c.joker ? ('J'+c.jid) : (c.suit+c.rank); }
 
+// Короткая подпись на аватарке места (2 символа) — выводится из текущего
+// имени места, поэтому одинаково правильно работает и для бота ("Бот 2" →
+// "Б2"), и для живого игрока онлайн-стола ("Игрок 3" → "И3").
+function seatAvatarShort(name){
+  const m = /^Игрок\s*(\d+)/.exec(name);
+  if(m) return 'И'+m[1];
+  const m2 = /^Бот\s*(\d+)/.exec(name);
+  if(m2) return 'Б'+m2[1];
+  return (name||'').slice(0,2) || '?';
+}
+
 function newPlayer(idx){
   return {idx, name:NAMES[idx], isHuman: idx===0, isRemoteHuman:false, away:false, hand:[], bid:null, tricks:0,
           total:0, missedAny:false, pulkaScores:[], orderRequests:0, orderWins:0};
@@ -489,16 +510,18 @@ function clearTurnTimer(){
   const el = document.getElementById('turnTimerBadge');
   if(el) el.classList.add('hidden');
 }
-function armTurnTimer(key, onTimeout){
+function armTurnTimer(key, onTimeout, durationMs){
   if(turnTimer.key === key) return; // отсчёт на это же решение уже идёт
   clearTurnTimer();
+  const ms = durationMs || TURN_TIMER_MS;
   turnTimer.key = key;
-  turnTimer.deadline = Date.now() + TURN_TIMER_MS;
+  turnTimer.deadline = Date.now() + ms;
   turnTimer.onTimeout = onTimeout;
   const el = document.getElementById('turnTimerBadge');
+  const label = key.startsWith('play:') ? 'на ход' : 'на решение';
   const tick = ()=>{
     const left = Math.max(0, Math.ceil((turnTimer.deadline - Date.now())/1000));
-    if(el){ el.classList.remove('hidden'); el.textContent = `⏱ ${left} сек. на ход`; }
+    if(el){ el.classList.remove('hidden'); el.textContent = `⏱ ${left} сек. ${label}`; }
     if(left<=0){
       const cb = turnTimer.onTimeout;
       clearTurnTimer();
@@ -510,10 +533,12 @@ function armTurnTimer(key, onTimeout){
 }
 
 // Сторож хода для чужого (не моего) места — актуально только хосту онлайн-
-// стола: если удалённый игрок не прислал решение за 10 сек, хост играет за
-// него сам и помечает место "away", пока тот не вернётся ("Я тут").
-function armDecisionWatch(seat, key, onTimeout){
-  if(seat===0){ armTurnTimer(key, onTimeout); return; }
+// стола: если удалённый игрок не прислал решение вовремя, хост играет за
+// него сам и помечает место "away", пока тот не вернётся ("Я тут"). Ход
+// картой ждём TURN_TIMER_MS (10 сек), а выбор козыря и заявку карт —
+// TRUMP_BID_TIMER_MS (30 сек), см. вызовы ниже.
+function armDecisionWatch(seat, key, onTimeout, durationMs){
+  if(seat===0){ armTurnTimer(key, onTimeout, durationMs); return; }
   if(!NET || !NET.isHost || !G.players[seat] || G.players[seat].away) return;
   if(NET.remoteTimers[seat] === key) return;
   if(NET.remoteTimeoutIds[seat]) clearTimeout(NET.remoteTimeoutIds[seat]);
@@ -521,7 +546,7 @@ function armDecisionWatch(seat, key, onTimeout){
   NET.remoteTimeoutIds[seat] = setTimeout(()=>{
     NET.remoteTimers[seat] = null;
     onTimeout();
-  }, TURN_TIMER_MS);
+  }, durationMs || TURN_TIMER_MS);
 }
 function clearDecisionWatch(seat){
   if(seat===0){ clearTurnTimer(); return; }
@@ -559,7 +584,7 @@ function initGame(){
 function startGame(){
   initGame();
   doAceDraw(()=>{
-    log(`Тузовка определила: сдаёт первым ${NAMES[G.dealer]}.`, true);
+    log(`Тузовка определила: сдаёт первым ${G.players[G.dealer].name}.`, true);
     startRound();
   });
 }
@@ -576,19 +601,19 @@ function doAceDraw(cb){
     const card = deck[i];
     const line = document.createElement('div');
     line.className = 'ace-line' + (card.rank==='A' ? ' ace-hit' : '');
-    line.textContent = `${NAMES[turn]}: ${card.rank}${card.suit}`;
+    line.textContent = `${G.players[turn].name}: ${card.rank}${card.suit}`;
     linesBox.appendChild(line);
     linesBox.scrollTop = linesBox.scrollHeight;
     if(card.rank==='A'){
       G.dealer = turn;
       const doneLine = document.createElement('p');
       doneLine.style.marginTop='10px';
-      doneLine.innerHTML = `<b style="color:var(--gold)">Туз выпал у ${NAMES[turn]} — он сдаёт первым.</b>`;
+      doneLine.innerHTML = `<b style="color:var(--gold)">Туз выпал у ${G.players[turn].name} — он сдаёт первым.</b>`;
       box.appendChild(doneLine);
-      const btn = document.createElement('button');
-      btn.className='btn'; btn.textContent='Начать игру'; btn.style.marginTop='10px';
-      btn.onclick = ()=>{ document.getElementById('modalOverlay').classList.add('hidden'); cb(); };
-      box.appendChild(btn);
+      // Раздаёт автоматически тот, у кого выпал туз — стол больше ни о чём
+      // не спрашивает (раньше тут была кнопка "Начать игру", которая ждала
+      // ручного клика хоста и держала весь стол на паузе, пока он не нажмёт).
+      setTimeout(()=>{ document.getElementById('modalOverlay').classList.add('hidden'); cb(); }, 1400);
       return;
     }
     turn = (turn+1)%4;
@@ -604,7 +629,7 @@ function log(msg, hi){
   G.logLines.push({msg, hi:!!hi});
 }
 
-function currentRound(){ return G.rounds[G.roundIdx]; }
+function currentRound(){ return (G && G.rounds) ? G.rounds[G.roundIdx] : null; }
 
 function startRound(){
   const r = currentRound();
@@ -631,7 +656,7 @@ function startRound(){
   G.jokerOrder = null;
   G.freeTrick = false;
 
-  log(`— Раздача ${G.roundIdx+1}/${G.rounds.length} (${r.phase}), по ${r.size} карт. Сдаёт ${NAMES[G.dealer]}.`, true);
+  log(`— Раздача ${G.roundIdx+1}/${G.rounds.length} (${r.phase}), по ${r.size} карт. Сдаёт ${G.players[G.dealer].name}.`, true);
 
   G.phase = 'trump';
   syncAllHands();
@@ -645,7 +670,7 @@ function startRound(){
     } else {
       G.trumpNone = true;
     }
-    log(`Козырь открыт из прикупа: ${G.trumpNone ? 'без козыря' : SUIT_NAMES[G.trumpSuit]+' '+G.trumpSuit}.`);
+    log(`Козырь открыт из прикупа: ${G.trumpNone ? 'без козыря' : SUIT_G.players[G.trumpSuit].name+' '+G.trumpSuit}.`);
     afterTrumpSet();
     broadcastStateIfHost();
   } else {
@@ -654,8 +679,8 @@ function startRound(){
     const chooser = (G.dealer+1)%4;
     const autoTrumpFor = (idx)=>{
       const suit = aiChooseTrump(G.players[idx].hand);
-      if(suit===null){ G.trumpNone=true; log(`${NAMES[idx]} объявляет: без козыря.`); }
-      else { G.trumpSuit=suit; log(`${NAMES[idx]} назначает козырь: ${SUIT_NAMES[suit]} ${suit}.`); }
+      if(suit===null){ G.trumpNone=true; log(`${G.players[idx].name} объявляет: без козыря.`); }
+      else { G.trumpSuit=suit; log(`${G.players[idx].name} назначает козырь: ${SUIT_G.players[suit].name} ${suit}.`); }
       afterTrumpSet();
       render();
     };
@@ -666,14 +691,14 @@ function startRound(){
         document.getElementById('controls').innerHTML='';
         autoTrumpFor(0);
         broadcastStateIfHost();
-      });
+      }, TRUMP_BID_TIMER_MS);
     } else if(G.players[chooser].isRemoteHuman && !G.players[chooser].away){
       render();
       armDecisionWatch(chooser, 'trump:'+G.roundIdx, ()=>{
         G.players[chooser].away = true;
         autoTrumpFor(chooser);
         broadcastStateIfHost();
-      });
+      }, TRUMP_BID_TIMER_MS);
     } else {
       setTimeout(()=>{ autoTrumpFor(chooser); broadcastStateIfHost(); }, 700);
     }
@@ -744,20 +769,20 @@ function doBiddingStep(){
 
   if(G.players[p].isHuman && !G.players[p].away && p===0){
     // Локальный игрок (на этом экране) — показываем интерфейс заявки и
-    // запускаем видимый 10-секундный таймер.
+    // запускаем видимый 30-секундный таймер (на саму заявку, не на ход).
     showBidUI(p, r.size, forbidden);
     armDecisionWatch(0, 'bid:'+G.roundIdx+':'+G.biddingPos, ()=>{
       G.players[0].away = true;
       document.getElementById('controls').innerHTML='';
       commitBid(0, autoBidFor(0));
-    });
+    }, TRUMP_BID_TIMER_MS);
   } else if(G.players[p].isHuman && !G.players[p].away){
     // Удалённый живой игрок онлайн-стола — ждём его ход по сети, хост
-    // молча следит за 10-секундным лимитом.
+    // молча следит за 30-секундным лимитом на заявку.
     armDecisionWatch(p, 'bid:'+G.roundIdx+':'+G.biddingPos, ()=>{
       G.players[p].away = true;
       commitBid(p, autoBidFor(p));
-    });
+    }, TRUMP_BID_TIMER_MS);
   } else {
     setTimeout(()=>{ commitBid(p, autoBidFor(p)); }, 900);
   }
@@ -789,7 +814,7 @@ function commitBid(p, bid){
   clearDecisionWatch(p);
   G.players[p].bid = bid;
   G.bidsSoFar.push(bid);
-  log(`${NAMES[p]} заявляет: ${bid}.`);
+  log(`${G.players[p].name} заявляет: ${bid}.`);
   G.biddingPos++;
   render();
   broadcastStateIfHost();
@@ -1007,9 +1032,61 @@ function applyWireState(payload){
     Object.assign(np, info, {hand: keepHand});
     G.players[local] = np;
   }
+  if(guestWaitingForHostModalOpen){
+    guestWaitingForHostModalOpen = false;
+    document.getElementById('modalOverlay').classList.add('hidden');
+  }
   render();
+  maybeShowMyPhaseUI();
   if(payload.gameOver){
     handleOnlineGameOver();
+  }
+}
+
+// На не-хосте показ интерфейса заявки/выбора козыря раньше нигде не
+// вызывался вовсе: showTrumpChoiceUI()/showBidUI() запускались только из
+// хостовской логики startRound()/doBiddingStep() для его СОБСТВЕННОГО места
+// 0. В итоге не-хост никогда не видел кнопки, чтобы самому походить/заявить/
+// назначить козырь — за него всегда молча доигрывал хостовский таймер
+// ожидания (armDecisionWatch), даже если человек сидел и смотрел на экран.
+// Эта функция закрывает пробел: вызывается на каждое обновление состояния
+// и, если сейчас очередь МЕНЯ (местное место 0) заявлять/выбирать козырь —
+// показывает нужный интерфейс и держит собственный видимый таймер (30 сек,
+// см. TRUMP_BID_TIMER_MS), который при истечении молча отправляет решение
+// хосту — точно так же, как если бы игрок нажал кнопку сам.
+function maybeShowMyPhaseUI(){
+  if(!G || !NET || NET.isHost) return;
+  if(!G.players[0] || G.players[0].away) return;
+  const r = currentRound();
+  if(!r) return;
+  if(G.phase==='trump' && r.mode==='choose' && !G.trumpSuit && !G.trumpNone){
+    const chooser = (G.dealer+1)%4;
+    if(chooser!==0) return;
+    const key = 'trump:'+G.roundIdx;
+    if(turnTimer.key===key) return; // уже показано и таймер уже идёт
+    showTrumpChoiceUI();
+    armTurnTimer(key, ()=>{
+      G.players[0].away = true;
+      document.getElementById('controls').innerHTML='';
+      const suit = aiChooseTrump(G.players[0].hand);
+      sendMove({type:'trump', suit});
+    }, TRUMP_BID_TIMER_MS);
+  } else if(G.phase==='bid' && G.biddingOrder && G.biddingOrder.length===4){
+    if(G.biddingOrder[G.biddingPos]!==0 || G.players[0].bid!==null) return;
+    const key = 'bid:'+G.roundIdx+':'+G.biddingPos;
+    if(turnTimer.key===key) return;
+    const isLast = G.biddingPos===3;
+    const sumSoFar = (G.bidsSoFar||[]).reduce((a,b)=>a+b,0);
+    const forbidden = isLast ? (r.size - sumSoFar) : null;
+    showBidUI(0, r.size, forbidden);
+    armTurnTimer(key, ()=>{
+      G.players[0].away = true;
+      document.getElementById('controls').innerHTML='';
+      let bid = aiEstimateBid(G.players[0].hand);
+      bid = Math.max(0, Math.min(r.size, bid));
+      if(forbidden!==null && bid===forbidden){ bid = bid>0 ? bid-1 : bid+1; bid = Math.max(0, Math.min(r.size, bid)); }
+      sendMove({type:'bid', bid});
+    }, TRUMP_BID_TIMER_MS);
   }
 }
 
@@ -1044,17 +1121,17 @@ function playCard(pIdx, card, jokerAction, jokerOrderChoice){
     // под масть, которую случайно положит следующий игрок.
     G.freeTrick = (suit === null);
     G.players[pIdx].orderRequests = (G.players[pIdx].orderRequests||0) + 1;
-    const desc = suit ? `заказывает масть ${SUIT_NAMES[suit]} ${suit}` : 'забирает любую карту без заказа';
-    log(`${NAMES[pIdx]} ходит джокером и ${desc}!`, true);
+    const desc = suit ? `заказывает масть ${SUIT_G.players[suit].name} ${suit}` : 'забирает любую карту без заказа';
+    log(`${G.players[pIdx].name} ходит джокером и ${desc}!`, true);
     showSeatBubble(pIdx, suit ? `Заказываю: ${suit}!` : 'Забираю! Без заказа.');
   } else if(card.joker && jokerAction==='take'){
-    log(`${NAMES[pIdx]} играет джокера (забираю).`);
+    log(`${G.players[pIdx].name} играет джокера (забираю).`);
     showSeatBubble(pIdx, 'Забираю!');
   } else if(card.joker && jokerAction==='duck'){
-    log(`${NAMES[pIdx]} играет джокера (ниже).`);
+    log(`${G.players[pIdx].name} играет джокера (ниже).`);
     showSeatBubble(pIdx, 'Ниже');
   } else {
-    log(`${NAMES[pIdx]} играет ${cardLabel(card)}.`);
+    log(`${G.players[pIdx].name} играет ${cardLabel(card)}.`);
   }
   render();
   syncAllHands();
@@ -1085,8 +1162,8 @@ function hostHandleRemoteMove(fromDbSeat, msg){
   clearDecisionWatch(localIdx);
   G.players[localIdx].away = false; // явно пришёл ход — значит, человек на месте
   if(msg.type==='trump'){
-    if(msg.suit===null){ G.trumpNone=true; log(`${NAMES[localIdx]} объявляет: без козыря.`); }
-    else { G.trumpSuit=msg.suit; log(`${NAMES[localIdx]} назначает козырь: ${SUIT_NAMES[msg.suit]} ${msg.suit}.`); }
+    if(msg.suit===null){ G.trumpNone=true; log(`${G.players[localIdx].name} объявляет: без козыря.`); }
+    else { G.trumpSuit=msg.suit; log(`${G.players[localIdx].name} назначает козырь: ${SUIT_G.players[msg.suit].name} ${msg.suit}.`); }
     afterTrumpSet();
     render();
     broadcastStateIfHost();
@@ -1127,7 +1204,7 @@ function resolveTrick(){
   if(G.jokerOrder && winner===G.jokerOrder.requesterIdx){
     G.players[winner].orderWins = (G.players[winner].orderWins||0) + 1;
   }
-  log(`Взятку берёт: ${NAMES[winner]}.`, true);
+  log(`Взятку берёт: ${G.players[winner].name}.`, true);
   G.lastTrick = {winner, cards: trick.map(t=>({playerIdx:t.playerIdx, card:t.card}))};
   G.trick = [];
   G.jokerOrder = null;
@@ -1262,7 +1339,7 @@ function startNewPulka(){
     p.missedAny=false;
     p.pulkaScores=[];
   }
-  log(`Новая пулька №${G.pulkaNum}. Сдаёт: ${NAMES[G.dealer]}.`, true);
+  log(`Новая пулька №${G.pulkaNum}. Сдаёт: ${G.players[G.dealer].name}.`, true);
   startRound();
 }
 
@@ -1361,8 +1438,8 @@ function render(){
   ib.innerHTML = `<span>Пулька <b>${G.pulkaNum}</b></span>
     <span>Раздача <b>${G.roundIdx+1}/${G.rounds.length}</b> (${r.phase})</span>
     <span>Карт: <b>${r.size}</b></span>
-    <span>Сдаёт: <b>${NAMES[G.dealer]}</b></span>`;
-  document.getElementById('trumpBadge').textContent = 'козырь: ' + (G.trumpNone ? 'нет' : (G.trumpSuit ? SUIT_NAMES[G.trumpSuit]+' '+G.trumpSuit : '—'));
+    <span>Сдаёт: <b>${G.players[G.dealer].name}</b></span>`;
+  document.getElementById('trumpBadge').textContent = 'козырь: ' + (G.trumpNone ? 'нет' : (G.trumpSuit ? SUIT_G.players[G.trumpSuit].name+' '+G.trumpSuit : '—'));
 
   // bidding status row
   const bidStatusEl = document.getElementById('bidStatus');
@@ -1374,7 +1451,7 @@ function render(){
       const chip = document.createElement('div');
       chip.className = 'bid-chip' + (pos===G.biddingPos ? ' active' : '');
       const bidVal = G.players[pIdx].bid;
-      chip.innerHTML = `${NAMES[pIdx]}: <span class="v">${bidVal===null ? '…' : bidVal}</span>`;
+      chip.innerHTML = `${G.players[pIdx].name}: <span class="v">${bidVal===null ? '…' : bidVal}</span>`;
       bidStatusEl.appendChild(chip);
     });
   } else {
@@ -1393,8 +1470,8 @@ function render(){
     const req = G.jokerOrder;
     orderBanner.classList.remove('hidden');
     orderBanner.textContent = req.suit
-      ? `🃏 ${NAMES[req.requesterIdx]} забирает джокером и заказывает ${SUIT_NAMES[req.suit]} ${req.suit}: есть эта масть — кладите её; нет масти, но есть козырь — кладите козырь; нет ни того ни другого — любая карта. Джокером можно ходить в любом случае.`
-      : `🃏 ${NAMES[req.requesterIdx]} забирает джокером — заказа нет, все играют что угодно.`;
+      ? `🃏 ${G.players[req.requesterIdx].name} забирает джокером и заказывает ${SUIT_G.players[req.suit].name} ${req.suit}: есть эта масть — кладите её; нет масти, но есть козырь — кладите козырь; нет ни того ни другого — любая карта. Джокером можно ходить в любом случае.`
+      : `🃏 ${G.players[req.requesterIdx].name} забирает джокером — заказа нет, все играют что угодно.`;
   } else {
     orderBanner.classList.add('hidden');
     orderBanner.textContent='';
@@ -1431,6 +1508,21 @@ function render(){
     seatEl.classList.toggle('dealer', G.dealer===i);
     seatEl.classList.toggle('turn', activeTurn===i);
   }
+
+  // Подписи мест и аватарки: в HTML они статично написаны "Бот 1/2/3", но
+  // если на этом месте на самом деле сидит живой игрок онлайн-стола, имя
+  // (G.players[i].name) уже будет "Игрок N" — подтягиваем его сюда, а не
+  // оставляем статичную заглушку "Бот".
+  for(let i=1;i<=3;i++){
+    const p = G.players[i];
+    const labelEl = document.getElementById('label-'+i);
+    if(labelEl) labelEl.textContent = p.name;
+    const seatEl = document.getElementById('seat-'+i);
+    const avatarEl = seatEl ? seatEl.querySelector('.avatar') : null;
+    if(avatarEl && avatarEl.firstChild && avatarEl.firstChild.nodeType===Node.TEXT_NODE){
+      avatarEl.firstChild.textContent = seatAvatarShort(p.name);
+    }
+  }
   for(let i=1;i<=3;i++){
     const mh = document.getElementById('mini-'+i);
     mh.innerHTML='';
@@ -1458,7 +1550,7 @@ function render(){
     wrap.appendChild(cardEl(t.card));
     const lab = document.createElement('div');
     lab.className='plabel';
-    lab.textContent = NAMES[t.playerIdx];
+    lab.textContent = G.players[t.playerIdx].name;
     wrap.appendChild(lab);
     tz.appendChild(wrap);
   }
@@ -1650,7 +1742,7 @@ function showTrumpChoiceUI(){
     btn.onclick = ()=>{
       clearTurnTimer();
       if(NET && !NET.isHost){ sendMove({type:'trump', suit:s}); c.innerHTML=''; return; }
-      G.trumpSuit=s; log(`Вы назначаете козырь: ${SUIT_NAMES[s]} ${s}.`); c.innerHTML=''; afterTrumpSet(); render(); broadcastStateIfHost();
+      G.trumpSuit=s; log(`Вы назначаете козырь: ${SUIT_G.players[s].name} ${s}.`); c.innerHTML=''; afterTrumpSet(); render(); broadcastStateIfHost();
     };
     grid.appendChild(btn);
   }
@@ -1794,11 +1886,11 @@ function showLastTrickDialog(){
   const cardsHtml = G.lastTrick.cards.map(t=>{
     const el = cardEl(t.card);
     el.style.margin = '0 auto';
-    return `<div style="display:inline-block; text-align:center; margin:6px 8px;">${el.outerHTML}<div style="font-size:0.7rem; margin-top:4px; color:rgba(242,234,217,0.85);">${NAMES[t.playerIdx]}</div></div>`;
+    return `<div style="display:inline-block; text-align:center; margin:6px 8px;">${el.outerHTML}<div style="font-size:0.7rem; margin-top:4px; color:rgba(242,234,217,0.85);">${G.players[t.playerIdx].name}</div></div>`;
   }).join('');
   box.innerHTML = `<h2>Последняя взятка</h2>
     <div style="display:flex; flex-wrap:wrap; justify-content:center;">${cardsHtml}</div>
-    <p style="text-align:center; margin-top:10px;">Забрал: <b style="color:var(--gold);">${NAMES[G.lastTrick.winner]}</b></p>
+    <p style="text-align:center; margin-top:10px;">Забрал: <b style="color:var(--gold);">${G.players[G.lastTrick.winner].name}</b></p>
     <div class="controls"><button class="btn secondary" id="closeLastTrickBtn">Закрыть</button></div>`;
   document.getElementById('modalOverlay').classList.remove('hidden');
   document.getElementById('closeLastTrickBtn').onclick = ()=>{
@@ -2155,6 +2247,7 @@ function startOnlineGame(tableId, mySeatDb, players){
     const box = document.getElementById('modalBox');
     box.innerHTML = `<h2>Ждём хост стола…</h2><p>Сейчас начнётся раздача.</p>`;
     document.getElementById('modalOverlay').classList.remove('hidden');
+    guestWaitingForHostModalOpen = true;
   }
 }
 
