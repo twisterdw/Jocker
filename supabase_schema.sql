@@ -82,14 +82,34 @@ create table if not exists jackpot_pool (
 -- Игрок вносит stake_per_pulka × 4 при входе за стол.
 create table if not exists game_tables (
   id                uuid primary key default gen_random_uuid(),
-  status            text not null default 'waiting' check (status in ('waiting','playing','finished')),
+  status            text not null default 'waiting' check (status in ('waiting','playing','finished','cancelled')),
   stake_per_pulka   integer not null default 0
     check (stake_per_pulka in (0,100,200,400,800,1600,3200,6400,12800,25600,51200)),
   pulkas_total       int not null default 4,
   mode              text not null default 'nines_short', -- ставки всегда на формате из 4 пулек
+  search_deadline   timestamptz, -- когда истекает поиск (единый для всех клиентов дедлайн, не локальный таймер)
   created_at        timestamptz not null default now(),
   finished_at       timestamptz
 );
+
+-- На случай, если таблица уже существовала до этого обновления схемы.
+do $$
+begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_name = 'game_tables' and column_name = 'search_deadline'
+  ) then
+    alter table game_tables add column search_deadline timestamptz;
+  end if;
+  -- Разрешить статус 'cancelled', если constraint остался от старой версии схемы.
+  if exists (
+    select 1 from pg_constraint where conname = 'game_tables_status_check'
+  ) then
+    alter table game_tables drop constraint game_tables_status_check;
+  end if;
+  alter table game_tables add constraint game_tables_status_check
+    check (status in ('waiting','playing','finished','cancelled'));
+end $$;
 
 create table if not exists table_players (
   table_id      uuid not null references game_tables(id) on delete cascade,

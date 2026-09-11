@@ -104,7 +104,7 @@ export function subscribeToTable(tableId, onChange) {
 export async function findOrCreateTable(yandexId, stakePerPulka, pulkasTotal) {
   const { data: waiting } = await supabase
     .from('game_tables')
-    .select('id')
+    .select('id, search_deadline')
     .eq('status', 'waiting')
     .eq('stake_per_pulka', stakePerPulka)
     .eq('pulkas_total', pulkasTotal)
@@ -117,29 +117,33 @@ export async function findOrCreateTable(yandexId, stakePerPulka, pulkasTotal) {
     for (let seat = 0; seat < 4; seat++) {
       if (taken.has(seat)) continue;
       const { error } = await supabase.from('table_players').insert({ table_id: t.id, seat, yandex_id: yandexId });
-      if (!error) return { tableId: t.id, mySeat: seat, isCreator: false };
+      if (!error) return { tableId: t.id, mySeat: seat, isCreator: false, searchDeadline: t.search_deadline };
       // конфликт мест — пробуем следующее свободное место/стол
     }
   }
 
   const { data: created, error: createErr } = await supabase
     .from('game_tables')
-    .insert({ status: 'waiting', stake_per_pulka: stakePerPulka, pulkas_total: pulkasTotal, mode: 'nines_short' })
+    .insert({
+      status: 'waiting', stake_per_pulka: stakePerPulka, pulkas_total: pulkasTotal, mode: 'nines_short',
+      search_deadline: new Date(Date.now() + 60000).toISOString(),
+    })
     .select().single();
   if (createErr) throw createErr;
 
   const { error: joinErr } = await supabase.from('table_players').insert({ table_id: created.id, seat: 0, yandex_id: yandexId });
   if (joinErr) throw joinErr;
-  return { tableId: created.id, mySeat: 0, isCreator: true };
+  return { tableId: created.id, mySeat: 0, isCreator: true, searchDeadline: created.search_deadline };
 }
 
-// Текущий статус стола ('waiting' | 'playing' | 'cancelled' | 'finished') —
-// используется НЕ-автором стола, чтобы понять, что автор уже закончил поиск
-// (пока автор считает 60 секунд, остальные просто опрашивают этот статус).
-export async function getTableStatus(tableId) {
-  const { data, error } = await supabase.from('game_tables').select('status').eq('id', tableId).single();
+// Статус стола + единый дедлайн поиска (search_deadline) — один и тот же
+// момент времени для ВСЕХ клиентов за этим столом (записан автором при
+// создании), чтобы отсчёт "осталось Nс" совпадал у всех, а не считался
+// каждым клиентом по-своему.
+export async function getTableInfo(tableId) {
+  const { data, error } = await supabase.from('game_tables').select('status, search_deadline').eq('id', tableId).single();
   if (error) return null;
-  return data ? data.status : null;
+  return data;
 }
 
 // Отменить стол и вернуть монеты ВСЕМ реальным (не боты) игрокам, кто уже
