@@ -101,42 +101,39 @@ export function subscribeToTable(tableId, onChange) {
 // Гонки (два клиента целятся в одно и то же место) отбиваются самой БД —
 // (table_id, seat) уникален, вставка второго просто упадёт, и код пробует
 // следующее место/стол.
-// Реализовано атомарно на сервере (fn_join_or_create_table, см.
-// patch-matchmaking-fix.sql): вся проверка "есть свободное место" и вставка
-// происходят под блокировкой строки стола в одной транзакции — это
-// гарантирует, что за уже полный (4/4) или не-waiting стол никто не
-// подсядет, даже при одновременном подключении нескольких игроков.
 export async function findOrCreateTable(yandexId, stakePerPulka, pulkasTotal) {
-  const { data, error } = await supabase.rpc('fn_join_or_create_table', {
-    p_yandex_id: yandexId, p_stake: stakePerPulka, p_pulkas: pulkasTotal,
-  });
-  if (error) throw error;
-  const row = Array.isArray(data) ? data[0] : data;
-  return { tableId: row.table_id, mySeat: row.seat, isCreator: row.is_creator, searchDeadline: row.search_deadline };
-}
+  const { data: waiting } = await supabase
+    .from('game_tables')
+    .select('id, search_deadline')
+    .eq('status', 'waiting')
+    .eq('stake_per_pulka', stakePerPulka)
+    .eq('pulkas_total', pulkasTotal)
+    .order('created_at', { ascending: true })
+    .limit(10);
 
-// Единая точка принятия решения "начать/отменить стол" — вызывать
-// периодически ЛЮБЫМ клиентом за столом (не только автором), пока идёт
-// поиск. Идемпотентно и безопасно при параллельных вызовах от нескольких
-// клиентов одновременно (см. fn_finalize_table_search): реальную работу
-// выполнит только тот вызов, который первым захватит блокировку строки
-// стола, остальные получат уже установившийся статус без побочных эффектов.
-// Раньше эту роль выполнял только клиент автора стола, и если его вкладка
-// сворачивалась (частый случай в мобильном браузере), стол зависал
-// навсегда — теперь от конкретного клиента ничего не зависит.
-// Возвращает: 'waiting' | 'playing' | 'cancelled'.
-export async function finalizeTableSearch(tableId) {
-  const { data, error } = await supabase.rpc('fn_finalize_table_search', { p_table_id: tableId });
-  if (error) throw error;
-  return data;
-}
+  for (const t of (waiting || [])) {
+    const { data: existing } = await supabase.from('table_players').select('seat').eq('table_id', t.id);
+    const taken = new Set((existing || []).map(r => r.seat));
+    for (let seat = 0; seat < 4; seat++) {
+      if (taken.has(seat)) continue;
+      const { error } = await supabase.from('table_players').insert({ table_id: t.id, seat, yandex_id: yandexId });
+      if (!error) return { tableId: t.id, mySeat: seat, isCreator: false, searchDeadline: t.search_deadline };
+      // конфликт мест — пробуем следующее свободное место/стол
+    }
+  }
 
-// Игрок сам выходит из поиска — убирает только его место и возвращает
-// только ему его ставку; на остальных живых игроков за этим же столом это
-// не влияет (см. fn_leave_search_and_refund).
-export async function leaveSearchAndRefund(yandexId, tableId) {
-  const { error } = await supabase.rpc('fn_leave_search_and_refund', { p_yandex_id: yandexId, p_table_id: tableId });
-  if (error) throw error;
+  const { data: created, error: createErr } = await supabase
+    .from('game_tables')
+    .insert({
+      status: 'waiting', stake_per_pulka: stakePerPulka, pulkas_total: pulkasTotal, mode: 'nines_short',
+      search_deadline: new Date(Date.now() + 60000).toISOString(),
+    })
+    .select().single();
+  if (createErr) throw createErr;
+
+  const { error: joinErr } = await supabase.from('table_players').insert({ table_id: created.id, seat: 0, yandex_id: yandexId });
+  if (joinErr) throw joinErr;
+  return { tableId: created.id, mySeat: 0, isCreator: true, searchDeadline: created.search_deadline };
 }
 
 // Статус стола + единый дедлайн поиска (search_deadline) — один и тот же
