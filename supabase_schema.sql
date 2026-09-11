@@ -209,6 +209,49 @@ begin
   return v_new_balance;
 end; $$;
 
+-- Профиль создаётся/меняется только через RPC — таблица profiles защищена
+-- RLS, а политика есть только на чтение (select). Прямой insert/update от
+-- клиента (anon-ключ) упирается в ошибку 42501 "new row violates row-level
+-- security policy", поэтому это идёт через security definer-функции, как и
+-- остальные rpc в этой схеме.
+
+-- Найти профиль по yandex_id, а если его ещё нет — создать
+-- с приветственным бонусом 1000 монет.
+create or replace function fn_ensure_profile(p_yandex_id text, p_display_name text default 'Игрок')
+returns profiles
+language plpgsql security definer as $$
+declare v_profile profiles;
+begin
+  select * into v_profile from profiles where yandex_id = p_yandex_id;
+  if found then
+    return v_profile;
+  end if;
+
+  insert into profiles (yandex_id, display_name, equipped_skin_id, coins)
+    values (p_yandex_id, coalesce(p_display_name, 'Игрок'), 'classic', 1000)
+    returning * into v_profile;
+
+  insert into coin_transactions (yandex_id, amount, reason)
+    values (p_yandex_id, 1000, 'welcome_bonus');
+
+  return v_profile;
+end; $$;
+
+-- Сменить экипированный скин — проверяет, что скин куплен
+-- (или что это бесплатный 'classic'), прежде чем экипировать.
+create or replace function fn_equip_skin(p_yandex_id text, p_skin_id text)
+returns void
+language plpgsql security definer as $$
+begin
+  if p_skin_id <> 'classic'
+     and not exists (select 1 from user_skins where yandex_id = p_yandex_id and skin_id = p_skin_id) then
+    raise exception 'skin % not owned by %', p_skin_id, p_yandex_id;
+  end if;
+
+  update profiles set equipped_skin_id = p_skin_id, updated_at = now()
+    where yandex_id = p_yandex_id;
+end; $$;
+
 -- Купить скин: проверяет цену и баланс сама, атомарно.
 create or replace function fn_buy_skin(p_yandex_id text, p_skin_id text)
 returns boolean
@@ -320,6 +363,162 @@ begin
 
   delete from table_players where table_id = p_table_id;
   update game_tables set status = 'cancelled' where id = p_table_id;
+end; $$;
+
+-- ------------------------------------------------------------
+-- Матчмейкинг лобби — атомарные функции, не зависящие от того, какой
+-- конкретно клиент (браузер игрока) сейчас открыт.
+--
+-- Раньше решение "начать игру ботами / отменить стол по таймауту"
+-- принимал ТОЛЬКО клиент автора стола, а поиск свободного места при
+-- посадке делался в браузере двумя отдельными запросами (select, потом
+-- insert) без общей блокировки. Из-за этого были три связанных бага:
+--   1) если вкладка автора сворачивалась (обычное дело в мобильном
+--      браузере), её таймер переставал тикать и стол зависал навсегда;
+--   2) счётчик игроков мог показывать больше живых игроков, чем на
+--      самом деле подключено — если кто-то закрывал вкладку во время
+--      поиска, его место оставалось занятым навсегда ("призрак");
+--   3) два игрока, целящиеся в одно и то же последнее место
+--      одновременно, могли оба решить, что оно свободно.
+-- Ниже это решается на сервере одной транзакцией с блокировкой строки
+-- стола (for update), поэтому подсчёт мест/дедлайн больше не зависят
+-- от гонки между запросами из разных браузеров.
+-- ------------------------------------------------------------
+
+-- Атомарный "найти стол или создать свой". Весь поиск свободного места и
+-- вставка происходят под блокировкой строки стола, поэтому никто не
+-- подсаживается на уже полный (4/4) или не-waiting стол по устаревшим
+-- данным.
+create or replace function fn_join_or_create_table(p_yandex_id text, p_stake integer, p_pulkas int)
+returns table(table_id uuid, seat int, is_creator boolean, search_deadline timestamptz)
+language plpgsql security definer as $$
+declare
+  v_table record;
+  v_taken int[];
+  v_seat int;
+  s int;
+begin
+  for v_table in
+    select gt.id, gt.search_deadline
+    from game_tables gt
+    where gt.status = 'waiting' and gt.stake_per_pulka = p_stake and gt.pulkas_total = p_pulkas
+    order by gt.created_at asc
+    for update
+  loop
+    select array_agg(tp.seat) into v_taken from table_players tp where tp.table_id = v_table.id;
+    v_seat := null;
+    for s in 0..3 loop
+      if v_taken is null or not (s = any(v_taken)) then
+        v_seat := s;
+        exit;
+      end if;
+    end loop;
+
+    if v_seat is not null then
+      insert into table_players (table_id, seat, yandex_id, last_seen_at)
+        values (v_table.id, v_seat, p_yandex_id, now());
+      return query select v_table.id, v_seat, false, v_table.search_deadline;
+      return;
+    end if;
+    -- этот стол уже полон (4/4) — пробуем следующий waiting-стол в списке
+  end loop;
+
+  -- Подходящего стола со свободным местом нет — создаём новый и садимся первым.
+  insert into game_tables (status, stake_per_pulka, pulkas_total, mode, search_deadline)
+    values ('waiting', p_stake, p_pulkas, 'nines_short', now() + interval '60 seconds')
+    returning id, search_deadline into v_table;
+  insert into table_players (table_id, seat, yandex_id, last_seen_at)
+    values (v_table.id, 0, p_yandex_id, now());
+  return query select v_table.id, 0, true, v_table.search_deadline;
+end; $$;
+
+-- Единая точка принятия решения по столу в поиске. Вызывается ПЕРИОДИЧЕСКИ
+-- ЛЮБЫМ клиентом за столом (не только автором) — благодаря "for update" и
+-- проверке status <> 'waiting' в начале, повторные/параллельные вызовы
+-- безопасны и идемпотентны: реальную работу выполнит только тот вызов,
+-- который первым захватит блокировку строки, для остальных функция сразу
+-- вернёт уже установившийся статус.
+-- Возвращает: 'waiting' | 'playing' | 'cancelled'.
+create or replace function fn_finalize_table_search(p_table_id uuid)
+returns text
+language plpgsql security definer as $$
+declare
+  v_table record;
+  v_real_count int;
+  v_taken int[];
+  v_bot_ids text[] := array['bot_1','bot_2','bot_3'];
+  v_bot_i int := 0;
+  s int;
+begin
+  select * into v_table from game_tables where id = p_table_id for update;
+  if v_table is null then
+    return 'cancelled';
+  end if;
+  if v_table.status <> 'waiting' then
+    return v_table.status; -- уже решено другим клиентом раньше — просто сообщаем текущий статус
+  end if;
+
+  -- Подчищаем "призраков": реальных игроков без свежего heartbeat
+  -- (клиент вызывает touchLastSeen раз в несколько секунд, пока идёт
+  -- поиск) — считаем их отключившимися и освобождаем место.
+  delete from table_players
+    where table_id = p_table_id and is_bot = false and last_seen_at < now() - interval '20 seconds';
+
+  select count(*) into v_real_count from table_players where table_id = p_table_id and is_bot = false;
+
+  if v_real_count >= 4 then
+    -- Все 4 места заняли живые игроки — начинаем сразу, не дожидаясь таймера.
+    update game_tables set status = 'playing' where id = p_table_id;
+    return 'playing';
+  end if;
+
+  if now() < v_table.search_deadline then
+    return 'waiting'; -- время поиска ещё не вышло — ждём
+  end if;
+
+  -- Дедлайн истёк.
+  if v_real_count >= 2 then
+    select array_agg(tp.seat) into v_taken from table_players tp where tp.table_id = p_table_id;
+    for s in 0..3 loop
+      if v_taken is null or not (s = any(v_taken)) then
+        insert into table_players (table_id, seat, yandex_id, is_bot, last_seen_at)
+          values (p_table_id, s, v_bot_ids[(v_bot_i % 3) + 1], true, now());
+        v_bot_i := v_bot_i + 1;
+      end if;
+    end loop;
+    update game_tables set status = 'playing' where id = p_table_id;
+    return 'playing';
+  else
+    perform fn_cancel_table_and_refund(p_table_id);
+    return 'cancelled';
+  end if;
+end; $$;
+
+-- Игрок сам вышел из поиска (кнопка "Отменить и вернуть монеты") — убирает
+-- ТОЛЬКО его место и возвращает ЕМУ ЛИЧНО его ставку; на остальных живых
+-- игроков за этим же столом это не влияет. Если после ухода за столом не
+-- осталось ни одного живого игрока — стол целиком отменяется, чтобы не
+-- висеть пустым в списке waiting.
+create or replace function fn_leave_search_and_refund(p_yandex_id text, p_table_id uuid)
+returns void
+language plpgsql security definer as $$
+declare v_stake integer; v_pulkas int; v_status text; v_remaining int;
+begin
+  select stake_per_pulka, pulkas_total, status into v_stake, v_pulkas, v_status
+    from game_tables where id = p_table_id for update;
+  if v_status is null or v_status <> 'waiting' then
+    return; -- игра уже началась/завершилась/отменена — тут выходить некуда
+  end if;
+
+  delete from table_players where table_id = p_table_id and yandex_id = p_yandex_id and is_bot = false;
+  perform fn_add_coins(p_yandex_id, v_stake * v_pulkas, 'stake_refund',
+    jsonb_build_object('table_id', p_table_id, 'reason', 'left_search'));
+
+  select count(*) into v_remaining from table_players where table_id = p_table_id and is_bot = false;
+  if v_remaining = 0 then
+    delete from table_players where table_id = p_table_id;
+    update game_tables set status = 'cancelled' where id = p_table_id;
+  end if;
 end; $$;
 
 -- Включаем realtime-репликацию на столах/местах, чтобы счётчик "N/4" в
