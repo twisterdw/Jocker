@@ -354,6 +354,7 @@ import {
   getTableInfo, cancelTableAndRefund, finalizeTableSearch, leaveSearchAndRefund, touchLastSeen,
   chargeStakeEntry, settleStakeSession,
   openGameChannel, broadcastGameState, sendGameMove, openHandChannel, sendHandTo,
+  openHostHandChannel, sendHandOn,
 } from './supabase-client.js';
 const SUITS = ['♠','♥','♦','♣'];
 const SUIT_NAMES = {'♠':'пики','♥':'черви','♦':'бубны','♣':'крести'};
@@ -965,8 +966,17 @@ function serializeStateForWire(){
   const playersDb = new Array(4);
   for(let local=0; local<4; local++){
     const p = G.players[local];
+    // БАГ (исправлено): раньше сюда шло p.name как есть, а у хоста
+    // G.players[0].name всегда буквально строка "Вы" (его подпись для
+    // самого себя). Эта строка "Вы" уходила по проводу всем остальным
+    // клиентам и попадала им в G.players[тот же db-номер].name — render()
+    // берёт лейбл места прямо из p.name (см. label-1..3), поэтому у каждого
+    // не-хоста хостовское место тоже подписывалось "Вы", и на экране
+    // одновременно было два кружка "Вы". Имя места 0 всегда нейтральное —
+    // каждый клиент сам решает для себя, назвать ли своё место "Вы".
+    const wireName = local===0 ? `Игрок ${toDb(0)+1}` : p.name;
     playersDb[toDb(local)] = {
-      name:p.name, isHuman:p.isHuman, isRemoteHuman:p.isRemoteHuman, away:p.away,
+      name:wireName, isHuman:p.isHuman, isRemoteHuman:p.isRemoteHuman, away:p.away,
       bid:p.bid, tricks:p.tricks, total:p.total, missedAny:p.missedAny,
       pulkaScores:p.pulkaScores, orderRequests:p.orderRequests, orderWins:p.orderWins,
       handCount:p.hand.length,
@@ -1001,7 +1011,13 @@ function syncAllHands(){
     const db = NET.dbOfLocal(local);
     const info = NET.seatInfo[db];
     if(info && !info.is_bot && db !== NET.mySeatDb){
-      sendHandTo(NET.tableId, db, G.players[local].hand.map(cardKey));
+      // Постоянный канал (см. openHostHandChannel в startOnlineGame) вместо
+      // старого sendHandTo, который каждый раз создавал новый канал и слал
+      // ровно один раз, не убедившись, что получатель уже точно подписан —
+      // это и была основная причина неполных рук у не-хостов.
+      const ch = NET.handChannels && NET.handChannels[db];
+      if(ch) sendHandOn(ch, G.players[local].hand.map(cardKey));
+      else sendHandTo(NET.tableId, db, G.players[local].hand.map(cardKey)); // подстраховка
     }
   }
 }
@@ -1942,6 +1958,10 @@ document.querySelector('.table-felt').addEventListener('click', ()=>{
 function leaveOnlineTableIfAny(){
   if(NET){
     try{ NET.channel && NET.channel.unsubscribe(); }catch(e){}
+    try{ NET.handChannel && NET.handChannel.unsubscribe(); }catch(e){}
+    if(NET.handChannels){
+      Object.values(NET.handChannels).forEach(ch=>{ try{ ch && ch.unsubscribe(); }catch(e){} });
+    }
     if(NET.remoteTimeoutIds){ Object.values(NET.remoteTimeoutIds).forEach(id=>{ if(id) clearTimeout(id); }); }
   }
   clearTurnTimer();
@@ -2209,12 +2229,14 @@ function startOnlineGame(tableId, mySeatDb, players){
     localOfDb: (db)=> (db - mySeatDb + 4) % 4,
     dbOfLocal: (local)=> (mySeatDb + local) % 4,
     channel: null,
+    handChannels: {}, // хост: db-место -> постоянный канал руки (см. openHostHandChannel)
   };
 
   GAME_MODE = STAKE.pulkas>1 ? 'nines' : 'nines_short';
   PULKA_LIMIT = STAKE.pulkas;
 
   NET.channel = openGameChannel(tableId, {
+    presenceKey: mySeatDb,
     onMove: (msg)=>{
       if(!NET.isHost) return;
       // msg приходит от чужого броадкаста — нам нужно понять, из какого
@@ -2224,6 +2246,14 @@ function startOnlineGame(tableId, mySeatDb, players){
       if(typeof msg.fromSeat === 'number') hostHandleRemoteMove(msg.fromSeat, msg);
     },
     onState: (payload)=>{ if(!NET.isHost) applyWireState(payload); },
+    // Гонка при подключении: если этот presence-join долетел до нас позже,
+    // чем самая первая рассылка состояния после раздачи — тот клиент мог
+    // пропустить её насовсем (Supabase не хранит историю broadcast для
+    // опоздавших подписчиков). Поэтому при КАЖДОМ presence-join хост
+    // переотправляет текущее состояние заново — это недорого и полностью
+    // убирает зависания "ждём бота", которые на деле были живым игроком,
+    // просто никогда не увидевшим, что уже его ход.
+    onPresenceJoin: ()=>{ if(NET.isHost) broadcastStateIfHost(); },
   });
 
   if(NET.isHost){
@@ -2236,6 +2266,16 @@ function startOnlineGame(tableId, mySeatDb, players){
       G.players[local].isRemoteHuman = !!info && !info.is_bot && local!==0;
       G.players[local].away = false;
       G.players[local].name = info && !info.is_bot ? (local===0?'Вы':`Игрок ${db+1}`) : NAMES[local];
+      // Постоянный (не одноразовый) канал руки на каждое живое не-хостовое
+      // место + переотправка руки при каждом presence-join этого места —
+      // той же гонки со stateChannel, но для приватных карт (раньше именно
+      // из-за неё часть игроков навсегда оставалась с неполной рукой).
+      if(info && !info.is_bot && db !== mySeatDb){
+        NET.handChannels[db] = openHostHandChannel(tableId, db, ()=>{
+          const p = G.players[NET.localOfDb(db)];
+          if(p) sendHandOn(NET.handChannels[db], p.hand.map(cardKey));
+        });
+      }
     }
     doAceDraw(()=>{ startRound(); syncAllHands(); broadcastStateIfHost(); });
   } else {

@@ -216,7 +216,7 @@ end; $$;
 -- остальные rpc в этой схеме.
 
 -- Найти профиль по yandex_id, а если его ещё нет — создать
--- с приветственным бонусом 1000 монет.
+-- с приветственным бонусом 10000 монет.
 create or replace function fn_ensure_profile(p_yandex_id text, p_display_name text default 'Игрок')
 returns profiles
 language plpgsql security definer as $$
@@ -228,11 +228,11 @@ begin
   end if;
 
   insert into profiles (yandex_id, display_name, equipped_skin_id, coins)
-    values (p_yandex_id, coalesce(p_display_name, 'Игрок'), 'classic', 1000)
+    values (p_yandex_id, coalesce(p_display_name, 'Игрок'), 'classic', 10000)
     returning * into v_profile;
 
   insert into coin_transactions (yandex_id, amount, reason)
-    values (p_yandex_id, 1000, 'welcome_bonus');
+    values (p_yandex_id, 10000, 'welcome_bonus');
 
   return v_profile;
 end; $$;

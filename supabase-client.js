@@ -196,11 +196,30 @@ export async function leaveTable(tableId, seat) {
 // количество карт у каждого — БЕЗ содержимого чужих рук) + ходы от
 // не-хоста к хосту. Хост — тот из живых игроков, кто сидит на меньшем
 // по номеру месте.
-export function openGameChannel(tableId, { onState, onMove } = {}) {
-  const ch = supabase.channel(`game:${tableId}`, { config: { broadcast: { self: false } } });
+//
+// ВАЖНО про гонку при подключении: broadcast-события Supabase Realtime НЕ
+// буферизуются сервером для тех, кто ещё не успел завершить подписку —
+// если хост шлёт state/hand раньше, чем второй клиент довёл до конца свой
+// channel.subscribe(), это сообщение теряется навсегда и никогда не
+// повторяется само. Раньше это и вызывало у части игроков "козырь: —" и
+// неполную руку, пока у хоста уже всё раздано. Чтобы закрыть эту гонку, оба
+// конца теперь дополнительно используют Presence: каждый клиент, подписавшись,
+// сам себя "отмечает" в канале (track), а хост слушает событие presence
+// 'join' и каждый раз, когда видит его, ПЕРЕОТПРАВЛЯЕТ актуальное состояние/
+// руку этому месту заново — это гарантированно происходит уже после того,
+// как подписка того клиента реально завершена, и не зависит от таймингов.
+export function openGameChannel(tableId, { onState, onMove, onPresenceJoin, presenceKey } = {}) {
+  const ch = supabase.channel(`game:${tableId}`, {
+    config: { broadcast: { self: false }, presence: { key: String(presenceKey ?? 'anon') } },
+  });
   if (onState) ch.on('broadcast', { event: 'state' }, (msg) => onState(msg.payload));
   if (onMove) ch.on('broadcast', { event: 'move' }, (msg) => onMove(msg.payload));
-  ch.subscribe();
+  if (onPresenceJoin) {
+    ch.on('presence', { event: 'join' }, ({ key }) => onPresenceJoin(key));
+  }
+  ch.subscribe((status) => {
+    if (status === 'SUBSCRIBED') ch.track({ at: Date.now() });
+  });
   return ch;
 }
 
@@ -214,13 +233,45 @@ export function sendGameMove(channel, movePayload) {
 
 // Приватный канал руки — подписывается только сам игрок этого места, чтобы
 // содержимое его карт не уходило остальным подписчикам общего канала.
+// Теперь тоже с presence: как только подписка реально готова, клиент
+// отмечается в канале, чтобы хост (через openHostHandChannel) мог понять,
+// что можно/нужно (пере)слать руку.
 export function openHandChannel(tableId, seat, onHand) {
-  const ch = supabase.channel(`game:${tableId}:hand:${seat}`, { config: { broadcast: { self: false } } });
+  const ch = supabase.channel(`game:${tableId}:hand:${seat}`, {
+    config: { broadcast: { self: false }, presence: { key: 'guest' } },
+  });
   ch.on('broadcast', { event: 'hand' }, (msg) => onHand(msg.payload));
-  ch.subscribe();
+  ch.subscribe((status) => {
+    if (status === 'SUBSCRIBED') ch.track({ at: Date.now() });
+  });
   return ch;
 }
 
+// Хостовская сторона приватного канала руки — держится открытой всю партию
+// (а не пересоздаётся на каждую отправку, как раньше), чтобы можно было
+// слушать presence 'join' от игрока этого места и переслать ему руку заново
+// при (пере)подключении, а не только один раз "в момент отправки повезло/не
+// повезло".
+export function openHostHandChannel(tableId, seat, onGuestJoin) {
+  const ch = supabase.channel(`game:${tableId}:hand:${seat}`, {
+    config: { broadcast: { self: false }, presence: { key: 'host' } },
+  });
+  if (onGuestJoin) {
+    ch.on('presence', { event: 'join' }, ({ key }) => { if (key !== 'host') onGuestJoin(); });
+  }
+  ch.subscribe((status) => {
+    if (status === 'SUBSCRIBED') ch.track({ at: Date.now() });
+  });
+  return ch;
+}
+
+export function sendHandOn(channel, cardKeys) {
+  channel.send({ type: 'broadcast', event: 'hand', payload: { cards: cardKeys } });
+}
+
+// Старая одноразовая отправка — оставлена только на случай прямого разового
+// вызова вне игровой сессии; для самой игры используйте openHostHandChannel +
+// sendHandOn, они не подвержены гонке подписки.
 export function sendHandTo(tableId, seat, cardKeys) {
   const ch = supabase.channel(`game:${tableId}:hand:${seat}`, { config: { broadcast: { self: false } } });
   ch.subscribe((status) => {
